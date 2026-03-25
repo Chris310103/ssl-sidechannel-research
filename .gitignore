@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Data
+data/raw/*
+data/processed/*
+data/external/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/external/.gitkeep
+
+# Model artifacts
+models/checkpoints/*
+models/pretrained/*
+models/outputs/*
+!models/checkpoints/.gitkeep
+!models/pretrained/.gitkeep
+!models/outputs/.gitkeep
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+
+# Testing / coverage
+.coverage
+.pytest_cache/
+htmlcov/
+
+# Misc
+*.swp

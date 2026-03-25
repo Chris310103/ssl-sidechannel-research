@@ -1,0 +1,12 @@
+numpy
+scipy
+pandas
+matplotlib
+scikit-learn
+jupyter
+notebook
+pyyaml
+tqdm
+h5py
+torch
+torchvision
