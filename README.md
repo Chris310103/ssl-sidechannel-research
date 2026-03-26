@@ -24,9 +24,7 @@ Adapt the following self-supervised learning methods to side-channel analysis:
 - `configs/`: dataset, method, and training configs
 - `notebooks/`: exploratory analysis and experiments
 - `src/`: source code
-- `scripts/`: runnable shell scripts
 - `weekly_updates/`: weekly markdown progress reports
-- `docs/`: notes and references
 
 ## Weekly Updates
 Progress will be tracked in markdown files under `weekly_updates/`.
