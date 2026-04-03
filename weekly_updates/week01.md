@@ -13,3 +13,4 @@ At this stage, I have gained an initial understanding of the side-channel attack
 
 ## Blockers
 There are no major blockers at the moment.
+
