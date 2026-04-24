@@ -8,3 +8,8 @@
 
 
 ## Plan
+* ascad paper with code
+* zero-tier
+* google colab
+
+* self-supervised learning
