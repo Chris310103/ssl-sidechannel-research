@@ -16,3 +16,10 @@
 
 
 ## Block and Question
+
+
+
+## Next Step
+* Get basic knowledge of ResNet
+* TS2Vec: look through the paper and try to use the code
+* if have time, please go through the tripletPower paper
