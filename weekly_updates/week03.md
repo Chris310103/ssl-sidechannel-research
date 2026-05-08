@@ -11,3 +11,9 @@
 ## Block and Question
 1. cannot completely understand some code of AES's simulation like Affine Masking and GF
 2. results of testing is not really well
+
+
+## comments
+1. Try GF256 and HW by using the code from the triplet network paper
+2. Label is not correct,
+3. read the triplet power paper: https://github.com/UCdasec/TripletPower/tree/master
