@@ -1,4 +1,4 @@
-# Week 02 progress report (April 29, 2026)
+# Week 03 progress report (April 29, 2026)
 
 ## Done
 1. zeritier has set up
