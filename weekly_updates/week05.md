@@ -52,3 +52,7 @@ The graph is:<br>
 
 
 ## Next Step
+
+## comments:
+* have a table of the network structure and hyperparameters
+* record the training time and testing time
