@@ -1,5 +1,7 @@
+.vscode/
+
 # data
-data/
+data/*
 *.h5
 *.hdf5
 
