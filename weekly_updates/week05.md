@@ -37,7 +37,8 @@ blow is the experiment result:
 
 The correct target key byte was successfully recovered.
 
-The graph is:
+The graph is:<br>
+
 ![ts2vec result](ts2vec_linear_probe_rank.png)
 
 2. have learned basic knowledge of ResNet
