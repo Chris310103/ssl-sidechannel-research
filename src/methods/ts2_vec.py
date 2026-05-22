@@ -65,7 +65,7 @@ def main():
     print("Representations shape:", representations.shape)
     print("Representations dtype:", representations.dtype)
 
-    output_dir = PROJECT_ROOT / "outputs" / "ts2vec"
+    output_dir = PROJECT_ROOT / "outputs" / "representations" / "ts2vec"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     np.save(output_dir / "ascad_ts2vec_repr_2048.npy", representations)

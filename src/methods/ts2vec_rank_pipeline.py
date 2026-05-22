@@ -41,10 +41,12 @@ def get_device(prefer_mps: bool = False) -> str:
 def main():
     ascad_path = PROJECT_ROOT / "data" / "raw" / "ascad" / "ASCAD.h5"
 
-    output_dir = PROJECT_ROOT / "outputs" / "ts2vec_rank"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    figure_dir = PROJECT_ROOT / "outputs" / "figures" / "ts2vec"
+    repr_dir = PROJECT_ROOT / "outputs" / "representations" / "ts2vec"
 
-    # Start small first. Later we can increase these.
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    repr_dir.mkdir(parents=True, exist_ok=True)
+
     n_train = 50000
     n_attack = 10000
     n_epochs = 10
@@ -114,9 +116,9 @@ def main():
     print("repr_train shape:", repr_train.shape)
     print("repr_attack shape:", repr_attack.shape)
 
-    np.save(output_dir / "repr_train.npy", repr_train)
-    np.save(output_dir / "repr_attack.npy", repr_attack)
-    np.save(output_dir / "y_train.npy", y_train)
+    np.save(repr_dir / "repr_train.npy", repr_train)
+    np.save(repr_dir / "repr_attack.npy", repr_attack)
+    np.save(repr_dir / "y_train.npy", y_train)
 
     print("Training linear classifier on TS2Vec representations...")
     clf = LogisticRegression(
@@ -147,17 +149,19 @@ def main():
     print("Final rank:", ranks[-1])
     print("Minimum rank:", ranks.min())
 
-    rank_path = output_dir / "ts2vec_linear_probe_rank.png"
+    rank_path = figure_dir / "ts2vec_linear_probe_rank.png"
+    ranks_path = repr_dir / "ts2vec_linear_probe_ranks.npy"
+    
     plot_rank_curve(
         ranks,
         save_path=rank_path,
         title="TS2Vec + Linear Probe Key Rank",
     )
-
-    np.save(output_dir / "ts2vec_linear_probe_ranks.npy", ranks)
+   
+    np.save(ranks_path, ranks)
 
     print("Saved rank curve to:", rank_path)
-    print("Saved ranks to:", output_dir / "ts2vec_linear_probe_ranks.npy")
+    print("Saved ranks to:", ranks_path / "ts2vec_linear_probe_ranks.npy")
 
 
 if __name__ == "__main__":
