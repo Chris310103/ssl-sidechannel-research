@@ -1,4 +1,4 @@
-
+from tqdm import tqdm
 from pathlib import Path
 from typing import Optional, Sequence, Union
 
@@ -79,7 +79,7 @@ def compute_rank_curve(
     scores = np.zeros(256, dtype=np.float64)
     ranks = np.zeros(num_traces, dtype=np.int64)
 
-    for i in range(num_traces):
+    for i in tqdm(range(num_traces), desc="Computing key rank"):
         plaintext_byte = int(metadata[i]["plaintext"][target_byte])
 
         # For every key guess k, compute Sbox(p ^ k).
