@@ -19,7 +19,7 @@ TS2VEC_ROOT = PROJECT_ROOT / "external" / "ts2vec"
 if str(TS2VEC_ROOT) not in sys.path:
     sys.path.insert(0, str(TS2VEC_ROOT))
 
-from ts2vec import TS2Vec  
+from ts2vec import TS2Vec
 
 
 def get_device(prefer_mps: bool = False) -> str:

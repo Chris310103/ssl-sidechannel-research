@@ -82,10 +82,8 @@ def compute_rank_curve(
     for i in tqdm(range(num_traces), desc="Computing key rank"):
         plaintext_byte = int(metadata[i]["plaintext"][target_byte])
 
-        # For every key guess k, compute Sbox(p ^ k).
         candidate_labels = AES_SBOX[np.bitwise_xor(plaintext_byte, key_candidates)]
 
-        # Probability assigned by the model to each key guess.
         key_probs = probas[i, candidate_labels]
 
         if use_log:
@@ -93,7 +91,6 @@ def compute_rank_curve(
         else:
             scores += key_probs
 
-        # Rank = number of candidates with score greater than the true key score.
         ranks[i] = int(np.sum(scores > scores[true_key]))
 
     return ranks
