@@ -1,52 +1,28 @@
-# Python
+# data
+data/raw/
+*.h5
+*.hdf5
+
+# external repositories
+external/*
+!external/README.md
+
+# large experiment outputs
+outputs/**/*.npy
+outputs/**/*.npz
+outputs/**/*.pt
+outputs/**/*.pth
+outputs/**/*.ckpt
+outputs/**/*.keras
+outputs/**/*.h5
+
+# python cache
 __pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.so
+*.pyc
 
-# Virtual environments
-.venv/
-venv/
-env/
-
-# Jupyter
+# notebooks
 .ipynb_checkpoints/
 
-# OS / editor
+# macOS
 .DS_Store
-Thumbs.db
-.vscode/
-.idea/
 
-# Logs
-*.log
-
-# Data
-data/raw/*
-data/processed/*
-data/external/*
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-!data/external/.gitkeep
-
-# Model artifacts
-models/checkpoints/*
-models/pretrained/*
-models/outputs/*
-!models/checkpoints/.gitkeep
-!models/pretrained/.gitkeep
-!models/outputs/.gitkeep
-
-# Python packaging
-build/
-dist/
-*.egg-info/
-
-# Testing / coverage
-.coverage
-.pytest_cache/
-htmlcov/
-
-# Misc
-*.swp
