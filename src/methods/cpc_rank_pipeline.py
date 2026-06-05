@@ -47,7 +47,7 @@ class CPCEncoder(nn.Module):
 
 
 class CPCModel(nn.Module):
-    def __init__(self, repr_dim=320, k_steps=3):
+    def __init__(self, repr_dim=320, k_steps=1):
         super().__init__()
         self.encoder = CPCEncoder(repr_dim=repr_dim)
         self.gru = nn.GRU(
@@ -79,7 +79,7 @@ class CPCModel(nn.Module):
         return h
 
 
-def cpc_loss(z, c, predictors, k_steps=3, temperature=0.2, num_t_samples=2):
+def cpc_loss(z, c, predictors, k_steps=1, temperature=0.2, num_t_samples=1):
     batch_size, seq_len, _ = z.shape
 
     if seq_len <= k_steps + 1:
@@ -124,8 +124,8 @@ def train_cpc(
     X_train,
     device,
     repr_dim=320,
-    k_steps=3,
-    num_t_samples=2,
+    k_steps=1,
+    num_t_samples=1,
     n_epochs=10,
     batch_size=64,
     lr=1e-3,
@@ -211,8 +211,8 @@ def main():
     batch_size = 64
     lr = 0.001
     repr_dim = 320
-    k_steps = 3
-    num_t_samples=2
+    k_steps = 1
+    num_t_samples=1
     target_byte = 2
 
     print("Loading ASCAD profiling traces...")
