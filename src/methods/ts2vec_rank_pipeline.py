@@ -1,10 +1,12 @@
 from pathlib import Path
 import sys
+import time
 
 import numpy as np
 import torch
 from sklearn.linear_model import LogisticRegression
 
+from src.utils.experiment_logger import append_experiment_result
 from src.datasets.ascad_loader import load_ascad_split
 from src.evaluation.rank_eval import (
     expand_proba_to_256,
@@ -94,12 +96,23 @@ def main():
     )
 
     print("Training TS2Vec...")
+
+    train_start_time=time.time()
     loss_log = model.fit(
         X_train,
         n_epochs=n_epochs,
         verbose=True,
     )
+    train_end_time=time.time()
+
+    train_time_sec = train_end_time - train_start_time
+    train_time_ms=1000*(train_end_time-train_start_time)
+
     print("TS2Vec loss log:", loss_log)
+    print(f"Training start time: {train_start_time}")
+    print(f"Training end time: {train_end_time}")
+    print(f"Training time: {train_time_sec:.2f} sec")
+    print(f"Training time: {train_time_ms:.2f} ms")
 
     print("Encoding profiling representations...")
     repr_train = model.encode(
@@ -149,6 +162,11 @@ def main():
     print("Final rank:", ranks[-1])
     print("Minimum rank:", ranks.min())
 
+    rank0_indices = np.where(ranks == 0)[0]
+    rank0_trace = int(rank0_indices[0] + 1) if len(rank0_indices) > 0 else -1
+
+    print("Rank-0 trace:", rank0_trace)
+
     rank_path = figure_dir / "ts2vec_linear_probe_rank.png"
     ranks_path = repr_dir / "ts2vec_linear_probe_ranks.npy"
     
@@ -161,7 +179,36 @@ def main():
     np.save(ranks_path, ranks)
 
     print("Saved rank curve to:", rank_path)
-    print("Saved ranks to:", ranks_path / "ts2vec_linear_probe_ranks.npy")
+    print("Saved ranks to:", ranks_path)
+
+    summary_path = PROJECT_ROOT / "outputs" / "logs" / "ts2vec" / "experiment_summary.csv"
+
+    append_experiment_result(
+        summary_path,
+        {
+            "method": "TS2Vec",
+            "dataset": "ASCAD.h5",
+            "n_train": n_train,
+            "n_attack": n_attack,
+            "n_epochs": n_epochs,
+            "batch_size": 64,
+            "lr": 0.001,
+            "repr_dim": 320,
+            "classifier": "LogisticRegression",
+            "target_byte": 2,
+            "device": device,
+            "train_start_time": train_start_time,
+            "train_end_time": train_end_time,
+            "train_time_sec": round(train_time_sec, 2),
+            "train_time_ms": round(train_time_ms, 2),
+            "final_rank": int(ranks[-1]),
+            "min_rank": int(ranks.min()),
+            "rank0_trace": rank0_trace,
+            "figure_path": str(rank_path.relative_to(PROJECT_ROOT)),
+        },
+    )
+
+    print("Saved experiment summary to:", summary_path)
 
 
 if __name__ == "__main__":
