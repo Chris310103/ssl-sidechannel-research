@@ -79,37 +79,45 @@ class CPCModel(nn.Module):
         return h
 
 
-def cpc_loss(z, c, predictors, k_steps=3, temperature=0.2):
+def cpc_loss(z, c, predictors, k_steps=3, temperature=0.2, num_t_samples=8):
     batch_size, seq_len, _ = z.shape
 
     if seq_len <= k_steps + 1:
         raise ValueError(f"Sequence length {seq_len} is too short for k_steps={k_steps}")
 
-    t = torch.randint(
-        low=0,
-        high=seq_len - k_steps,
-        size=(1,),
-        device=z.device,
-    ).item()
+    max_t = seq_len - k_steps
+    num_t_samples = min(num_t_samples, max_t)
 
-    context = c[:, t, :]
+    t_samples = torch.randint(
+        low=0,
+        high=max_t,
+        size=(num_t_samples,),
+        device=z.device,
+    )
+
     labels = torch.arange(batch_size, device=z.device)
 
     total_loss = 0.0
+    loss_count = 0
 
-    for k in range(1, k_steps + 1):
-        pred = predictors[k - 1](context)
-        target = z[:, t + k, :]
+    for t in t_samples:
+        t = int(t.item())
+        context = c[:, t, :]
 
-        pred = F.normalize(pred, dim=1)
-        target = F.normalize(target, dim=1)
+        for k in range(1, k_steps + 1):
+            pred = predictors[k - 1](context)
+            target = z[:, t + k, :]
 
-        logits = torch.matmul(pred, target.T) / temperature
-        loss = F.cross_entropy(logits, labels)
+            pred = F.normalize(pred, dim=1)
+            target = F.normalize(target, dim=1)
 
-        total_loss = total_loss + loss
+            logits = torch.matmul(pred, target.T) / temperature
+            loss = F.cross_entropy(logits, labels)
 
-    return total_loss / k_steps
+            total_loss = total_loss + loss
+            loss_count += 1
+
+    return total_loss / loss_count
 
 
 def train_cpc(
@@ -117,6 +125,7 @@ def train_cpc(
     device,
     repr_dim=320,
     k_steps=3,
+    num_t_samples=8,
     n_epochs=10,
     batch_size=64,
     lr=1e-3,
@@ -146,12 +155,13 @@ def train_cpc(
 
             z, c = model(batch_x)
             loss = cpc_loss(
-                z=z,
-                c=c,
-                predictors=model.predictors,
-                k_steps=k_steps,
-                temperature=0.2,
-            )
+                    z=z,
+                    c=c,
+                    predictors=model.predictors,
+                    k_steps=k_steps,
+                    temperature=0.2,
+                    num_t_samples=num_t_samples,
+                )
 
             optimizer.zero_grad()
             loss.backward()
@@ -202,6 +212,7 @@ def main():
     lr = 0.001
     repr_dim = 320
     k_steps = 3
+    num_t_samples=8
     target_byte = 2
 
     print("Loading ASCAD profiling traces...")
@@ -245,6 +256,7 @@ def main():
         device=device,
         repr_dim=repr_dim,
         k_steps=k_steps,
+        num_t_samples=num_t_samples,
         n_epochs=n_epochs,
         batch_size=batch_size,
         lr=lr,
@@ -348,6 +360,7 @@ def main():
             "lr": lr,
             "repr_dim": repr_dim,
             "k_steps": k_steps,
+            "num_t_samples": num_t_samples,
             "classifier": "LogisticRegression",
             "target_byte": target_byte,
             "device": device,
