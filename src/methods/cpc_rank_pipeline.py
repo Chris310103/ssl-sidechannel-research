@@ -211,8 +211,8 @@ def main():
     batch_size = 64
     lr = 0.001
     repr_dim = 320
-    k_steps = 1
-    num_t_samples=1
+    k_steps = 3
+    num_t_samples = 1
     target_byte = 2
 
     print("Loading ASCAD profiling traces...")
