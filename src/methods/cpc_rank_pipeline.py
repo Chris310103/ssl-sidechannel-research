@@ -67,8 +67,16 @@ class CPCModel(nn.Module):
         return z, c
 
     def encode(self, x):
-        _, c = self.forward(x)
-        return c.mean(dim=1)
+        z, c = self.forward(x)
+        h = torch.cat(
+            [
+                c.mean(dim=1),
+                c[:, -1, :],
+                z.mean(dim=1),
+            ],
+            dim=1,
+        )
+        return h
 
 
 def cpc_loss(z, c, predictors, k_steps=3, temperature=0.2):
@@ -189,7 +197,7 @@ def main():
 
     n_train = 50000
     n_attack = 10000
-    n_epochs = 10
+    n_epochs = 30
     batch_size = 64
     lr = 0.001
     repr_dim = 320
