@@ -181,7 +181,7 @@ def main():
     print("Saved rank curve to:", rank_path)
     print("Saved ranks to:", ranks_path)
 
-    summary_path = PROJECT_ROOT / "outputs" / "logs" / "ts2vec" / "experiment_summary.csv"
+    summary_path = PROJECT_ROOT / "outputs" / "logs" / "experiment_summary.csv"
 
     append_experiment_result(
         summary_path,
