@@ -79,7 +79,7 @@ class CPCModel(nn.Module):
         return h
 
 
-def cpc_loss(z, c, predictors, k_steps=3, temperature=0.2, num_t_samples=8):
+def cpc_loss(z, c, predictors, k_steps=3, temperature=0.2, num_t_samples=2):
     batch_size, seq_len, _ = z.shape
 
     if seq_len <= k_steps + 1:
@@ -125,7 +125,7 @@ def train_cpc(
     device,
     repr_dim=320,
     k_steps=3,
-    num_t_samples=8,
+    num_t_samples=2,
     n_epochs=10,
     batch_size=64,
     lr=1e-3,
@@ -212,7 +212,7 @@ def main():
     lr = 0.001
     repr_dim = 320
     k_steps = 3
-    num_t_samples=8
+    num_t_samples=2
     target_byte = 2
 
     print("Loading ASCAD profiling traces...")
