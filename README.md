@@ -6,7 +6,7 @@ This repository is for a remote research internship project on adapting self-sup
 Adapt the following self-supervised learning methods to side-channel analysis:
 - TS2Vec
 - SimCLR
-- CPC
+- CPC (Contrastive Predicitive Coding) - https://github.com/Spijkervet/contrastive-predictive-coding
 - MAE
 - BYOL
 
