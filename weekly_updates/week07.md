@@ -40,6 +40,7 @@
 | BYOL-1D | `repr_dim=320`, `proj_dim=256`, `hidden_dim=512`, `ema_decay=0.99`, `augmentation=random_shift(10)+gaussian_noise(0.05)+scale_jitter(0.1)+time_mask(0.05)`, `target_byte=2`, `classifier=LogisticRegression` |
 
 ## Plan for Next Week
-
+* increase the pre-training epochs to 100
+* adjust learning rate if testing is not successful
 
 ## Blockers
