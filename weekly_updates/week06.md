@@ -30,6 +30,8 @@
 
 
 ## Plan for Next Week
-
+* continue to do the MAE and BYOL
+* I will write the next phase plan and send it to you
 
 ## Blockers
+
