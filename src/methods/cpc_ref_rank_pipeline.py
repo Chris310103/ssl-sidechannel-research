@@ -26,19 +26,19 @@ class CPCRefEncoder(nn.Module):
         super().__init__()
 
         self.net = nn.Sequential(
-            nn.Conv1d(input_channels, hidden_dim, kernel_size=10, stride=5, padding=2),
+            nn.Conv1d(input_channels, hidden_dim, kernel_size=10, stride=2, padding=4),
             nn.ReLU(),
 
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=8, stride=4, padding=2),
-            nn.ReLU(),
-
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=4, stride=2, padding=2),
-            nn.ReLU(),
-
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=4, stride=2, padding=2),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=8, stride=2, padding=3),
             nn.ReLU(),
 
             nn.Conv1d(hidden_dim, hidden_dim, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(),
+
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(),
+
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=4, stride=1, padding=1),
             nn.ReLU(),
         )
 
@@ -212,6 +212,12 @@ def train_cpc_ref(
 
             z, c, pred = model(batch_x)
 
+            if epoch == 0 and num_batches == 0:
+                print("z shape:", z.shape)
+                print("c shape:", c.shape)
+                print("pred shape:", pred.shape)
+
+
             loss, acc = cpc_ref_loss(
                 z=z,
                 pred=pred,
@@ -327,7 +333,6 @@ def main():
     batch_size=batch_size,
     lr=lr,
 )
-
     train_end_time = time.time()
     train_time_sec = train_end_time - train_start_time
     train_time_ms = 1000 * train_time_sec
@@ -405,7 +410,7 @@ def main():
     plot_rank_curve(
         ranks,
         save_path=rank_path,
-        title="CPC + Linear Probe Key Rank",
+        title="CPC-ref + Linear Probe Key Rank"
     )
 
     np.save(ranks_path, ranks)
