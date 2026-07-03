@@ -22,16 +22,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class MAE1D(nn.Module):
-    """
-    Lightweight 1D masked autoencoder for ASCAD traces.
-
-    Input:
-        x: [B, trace_len, 1]
-    Pretext task:
-        randomly mask temporal patches and reconstruct the masked raw patches.
-    Downstream feature:
-        mean-pooled Transformer patch representation.
-    """
 
     def __init__(
         self,
