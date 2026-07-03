@@ -80,7 +80,7 @@ class CPCRefModel(nn.Module):
         z = self.encoder(x)
         c, _ = self.gru(z)
         pred = self.predictor(c)
-        return z, c
+        return z, c, pred
 
     def encode(self, x, mode="context_mean"):
         z, c, _ = self.forward(x)
