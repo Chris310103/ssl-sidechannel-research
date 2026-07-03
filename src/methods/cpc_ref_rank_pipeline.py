@@ -282,7 +282,7 @@ def main():
     repr_dim = 320
     context_dim = 320
     prediction_steps = 12
-    negative_samples = 32
+    negative_samples = 16
 
     target_byte = 2
 
