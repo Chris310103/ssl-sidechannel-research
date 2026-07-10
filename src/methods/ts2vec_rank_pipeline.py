@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from sklearn.linear_model import LogisticRegression
 
-from utils.get_device import get_device
+from src.utils.get_device import get_device
 from src.utils.experiment_logger import append_experiment_result
 from src.datasets.ascad_loader import load_ascad_split
 from src.evaluation.rank_eval import (
