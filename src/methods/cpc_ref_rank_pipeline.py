@@ -264,9 +264,11 @@ def encode_representations(model, X, device, batch_size=256):
 def main():
     ascad_path = PROJECT_ROOT / "data" / "raw" / "ascad" / "ASCAD.h5"
 
-    figure_dir = PROJECT_ROOT / "outputs" / "figures" / "cpc_ref"
-    repr_dir = PROJECT_ROOT / "outputs" / "representations" / "cpc_ref"
-    checkpoint_dir = PROJECT_ROOT / "outputs" / "checkpoints" / "cpc_ref"
+    run_name= "cpc_ref_pred6_neg10_ep100"
+
+    figure_dir = PROJECT_ROOT / "outputs" / "figures" / run_name
+    repr_dir = PROJECT_ROOT / "outputs" / "representations" / run_name
+    checkpoint_dir = PROJECT_ROOT / "outputs" / "checkpoints" / run_name
 
     figure_dir.mkdir(parents=True, exist_ok=True)
     repr_dir.mkdir(parents=True, exist_ok=True)
@@ -275,14 +277,14 @@ def main():
     n_train = 50000
     n_attack = 10000
 
-    n_epochs = 30
+    n_epochs = 100
     batch_size = 64
     lr = 2e-4
 
     repr_dim = 320
     context_dim = 320
     prediction_steps = 6
-    negative_samples = 12
+    negative_samples = 10
 
     target_byte = 2
 
@@ -343,7 +345,7 @@ def main():
     print(f"Training time: {train_time_sec:.2f} sec")
     print(f"Training time: {train_time_ms:.2f} ms")
 
-    checkpoint_path = checkpoint_dir / "cpc_ref_encoder.pt"
+    checkpoint_path = checkpoint_dir / f"{run_name}_encoder.pt"
 
     torch.save(model.state_dict(), checkpoint_path)
     print("Saved checkpoint to:", checkpoint_path)
@@ -404,8 +406,8 @@ def main():
 
     print("Rank-0 trace:", rank0_trace)
 
-    rank_path = figure_dir / "cpc_ref_linear_probe_rank.png"
-    ranks_path = repr_dir / "cpc_ref_linear_probe_ranks.npy"
+    rank_path = figure_dir / f"{run_name}_linear_probe_rank.png"
+    ranks_path = repr_dir / f"{run_name}_linear_probe_ranks.npt"
 
     plot_rank_curve(
         ranks,
