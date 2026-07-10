@@ -45,7 +45,7 @@ def main():
 
     n_train = 50000
     n_attack = 10000
-    n_epochs = 100
+    n_epochs = 10
     batch_size = 64
     lr = 0.001
     repr_dim = 320
