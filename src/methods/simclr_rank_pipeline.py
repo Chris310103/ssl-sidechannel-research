@@ -199,22 +199,24 @@ def encode_representations(model, X, device, batch_size=256):
 def main():
     ascad_path = PROJECT_ROOT / "data" / "raw" / "ascad" / "ASCAD.h5"
 
-    figure_dir = PROJECT_ROOT / "outputs" / "figures" / "simclr"
-    repr_dir = PROJECT_ROOT / "outputs" / "representations" / "simclr"
-    checkpoint_dir = PROJECT_ROOT / "outputs" / "checkpoints" / "simclr"
-
-    figure_dir.mkdir(parents=True, exist_ok=True)
-    repr_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
     n_train = 50000
     n_attack = 10000
-    n_epochs = 10
+    n_epochs = 100
     batch_size = 64
     lr = 0.001
     repr_dim = 320
     proj_dim = 128
     target_byte = 2
+
+    run_name = f"simclr_ep{n_epochs}"
+
+    figure_dir = PROJECT_ROOT / "outputs" / "figures" / run_name
+    repr_dir = PROJECT_ROOT / "outputs" / "representations" / run_name
+    checkpoint_dir = PROJECT_ROOT / "outputs" / "checkpoints" / run_name
+
+    figure_dir.mkdir(parents=True, exist_ok=True)
+    repr_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     print("Loading ASCAD profiling traces...")
     X_profiling, y_profiling = load_ascad_split(
@@ -271,7 +273,7 @@ def main():
     print(f"Training time: {train_time_sec:.2f} sec")
     print(f"Training time: {train_time_ms:.2f} ms")
 
-    checkpoint_path = checkpoint_dir / "simclr_encoder.pt"
+    checkpoint_path = checkpoint_dir / f"{run_name}_encoder.pt"
     torch.save(model.state_dict(), checkpoint_path)
     print("Saved checkpoint to:", checkpoint_path)
 
@@ -330,8 +332,9 @@ def main():
     rank0_trace = int(rank0_indices[0] + 1) if len(rank0_indices) > 0 else -1
     print("Rank-0 trace:", rank0_trace)
 
-    rank_path = figure_dir / "simclr_linear_probe_rank.png"
-    ranks_path = repr_dir / "simclr_linear_probe_ranks.npy"
+    rank_path = figure_dir / f"{run_name}_linear_probe_rank.png"
+    ranks_path = repr_dir / f"{run_name}_linear_probe_ranks.npy"
+
 
     plot_rank_curve(
         ranks,

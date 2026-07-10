@@ -43,15 +43,23 @@ def get_device(prefer_mps: bool = False) -> str:
 def main():
     ascad_path = PROJECT_ROOT / "data" / "raw" / "ascad" / "ASCAD.h5"
 
-    figure_dir = PROJECT_ROOT / "outputs" / "figures" / "ts2vec"
-    repr_dir = PROJECT_ROOT / "outputs" / "representations" / "ts2vec"
+    n_train = 50000
+    n_attack = 10000
+    n_epochs = 100
+    batch_size = 64
+    lr = 0.001
+    repr_dim = 320
+    target_byte = 2
+
+    run_name = f"ts2vec_ep{n_epochs}"
+
+    figure_dir = PROJECT_ROOT / "outputs" / "figures" / run_name
+    repr_dir = PROJECT_ROOT / "outputs" / "representations" / run_name
+    checkpoint_dir = PROJECT_ROOT / "outputs" / "checkpoints" / run_name
 
     figure_dir.mkdir(parents=True, exist_ok=True)
     repr_dir.mkdir(parents=True, exist_ok=True)
-
-    n_train = 50000
-    n_attack = 10000
-    n_epochs = 10
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     print("Loading ASCAD profiling traces...")
     X_profiling, y_profiling = load_ascad_split(
@@ -87,13 +95,13 @@ def main():
 
     model = TS2Vec(
         input_dims=1,
-        output_dims=320,
+        output_dims=repr_dim,
         hidden_dims=64,
         depth=6,
         device=device,
-        lr=0.001,
-        batch_size=64,
-    )
+        lr=lr,
+        batch_size=batch_size,
+        )
 
     print("Training TS2Vec...")
 
@@ -113,6 +121,10 @@ def main():
     print(f"Training end time: {train_end_time}")
     print(f"Training time: {train_time_sec:.2f} sec")
     print(f"Training time: {train_time_ms:.2f} ms")
+
+    checkpoint_path = checkpoint_dir / f"{run_name}_encoder.pt"
+    model.save(str(checkpoint_path))
+    print("Saved checkpoint to:", checkpoint_path)
 
     print("Encoding profiling representations...")
     repr_train = model.encode(
@@ -152,12 +164,12 @@ def main():
 
     print("Computing key rank curve...")
     ranks = compute_rank_curve(
-        probas=attack_probas,
-        metadata=metadata_attack_small,
-        target_byte=2,
-        max_traces=n_attack,
-        use_log=True,
-    )
+    probas=attack_probas,
+    metadata=metadata_attack_small,
+    target_byte=target_byte,
+    max_traces=n_attack,
+    use_log=True,
+)
 
     print("Final rank:", ranks[-1])
     print("Minimum rank:", ranks.min())
@@ -167,8 +179,8 @@ def main():
 
     print("Rank-0 trace:", rank0_trace)
 
-    rank_path = figure_dir / "ts2vec_linear_probe_rank.png"
-    ranks_path = repr_dir / "ts2vec_linear_probe_ranks.npy"
+    rank_path = figure_dir / f"{run_name}_linear_probe_rank.png"
+    ranks_path = repr_dir / f"{run_name}_linear_probe_ranks.npy"
     
     plot_rank_curve(
         ranks,
@@ -191,11 +203,13 @@ def main():
             "n_train": n_train,
             "n_attack": n_attack,
             "n_epochs": n_epochs,
-            "batch_size": 64,
-            "lr": 0.001,
-            "repr_dim": 320,
+            "run_name": run_name,
+            "batch_size": batch_size,
+            "lr": lr,
+            "repr_dim": repr_dim,
             "classifier": "LogisticRegression",
-            "target_byte": 2,
+            "target_byte": target_byte,
+            "checkpoint_path": str(checkpoint_path.relative_to(PROJECT_ROOT)),
             "device": device,
             "train_start_time": train_start_time,
             "train_end_time": train_end_time,
