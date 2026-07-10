@@ -1,4 +1,3 @@
-```markdown
 # Week 08 Progress Update(July 10 2026)
 
 ## Done
@@ -28,6 +27,7 @@
 ![byol best run](week08/figures/byol_weakaug_shift3_noise0p01_scale0p0_mask0_ema0p996_proj128_meanmax_ep100/byol_weakaug_shift3_noise0p01_scale0p0_mask0_ema0p996_proj128_meanmax_ep100_linear_probe_rank.png)
 
 ### Result Summary
+
 | Method | Variant | Epochs | Batch Size | LR | Representation Dim | Final Rank | Min Rank | Rank-0 Trace | Train Time |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
 | TS2Vec | TS2Vec ep10 | 10 | 64 | `1e-3` | 320 | **0** | **0** | **167** | 327.40s |
