@@ -100,7 +100,7 @@ class ConvTraceEncoder(nn.Module):
     Input:
         x: [B, L, 1]
     Output:
-        h: [B, repr_dim]
+        h: [B, T, repr_dim]
     """
 
     def __init__(self, repr_dim=320):
@@ -122,13 +122,12 @@ class ConvTraceEncoder(nn.Module):
             nn.Conv1d(256, repr_dim, kernel_size=11, stride=2, padding=5),
             nn.BatchNorm1d(repr_dim),
             nn.ReLU(),
-
-            nn.AdaptiveAvgPool1d(1),
         )
 
     def forward(self, x):
-        x = x.transpose(1, 2)  # [B, L, 1] -> [B, 1, L]
-        h = self.net(x).squeeze(-1)
+        x = x.transpose(1, 2)      # [B, L, 1] -> [B, 1, L]
+        h = self.net(x)            # [B, C, T]
+        h = h.transpose(1, 2)      # [B, T, C]
         return h
 
 
@@ -145,23 +144,28 @@ class MLPHead(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-
 class BYOL1D(nn.Module):
     def __init__(
         self,
         repr_dim=320,
-        proj_dim=256,
+        proj_dim=128,
         hidden_dim=512,
-        ema_decay=0.99,
+        ema_decay=0.996,
     ):
         super().__init__()
 
+        self.repr_dim = repr_dim
+        self.pooled_dim = repr_dim * 2
+        self.ema_decay = ema_decay
+
         self.online_encoder = ConvTraceEncoder(repr_dim=repr_dim)
+
         self.online_projector = MLPHead(
-            in_dim=repr_dim,
+            in_dim=self.pooled_dim,
             hidden_dim=hidden_dim,
             out_dim=proj_dim,
         )
+
         self.online_predictor = MLPHead(
             in_dim=proj_dim,
             hidden_dim=hidden_dim,
@@ -171,8 +175,17 @@ class BYOL1D(nn.Module):
         self.target_encoder = deepcopy(self.online_encoder)
         self.target_projector = deepcopy(self.online_projector)
 
-        self.ema_decay = ema_decay
         self._set_target_requires_grad(False)
+
+    @staticmethod
+    def pool_features(h):
+        """
+        h: [B, T, C]
+        return: [B, 2C]
+        """
+        h_mean = h.mean(dim=1)
+        h_max = h.max(dim=1).values
+        return torch.cat([h_mean, h_max], dim=1)
 
     def _set_target_requires_grad(self, requires_grad):
         for param in self.target_encoder.parameters():
@@ -207,8 +220,8 @@ class BYOL1D(nn.Module):
         return 2.0 - 2.0 * (p * z).sum(dim=1).mean()
 
     def forward(self, x1, x2):
-        online_h1 = self.online_encoder(x1)
-        online_h2 = self.online_encoder(x2)
+        online_h1 = self.pool_features(self.online_encoder(x1))
+        online_h2 = self.pool_features(self.online_encoder(x2))
 
         online_z1 = self.online_projector(online_h1)
         online_z2 = self.online_projector(online_h2)
@@ -217,8 +230,8 @@ class BYOL1D(nn.Module):
         pred2 = self.online_predictor(online_z2)
 
         with torch.no_grad():
-            target_h1 = self.target_encoder(x1)
-            target_h2 = self.target_encoder(x2)
+            target_h1 = self.pool_features(self.target_encoder(x1))
+            target_h2 = self.pool_features(self.target_encoder(x2))
 
             target_z1 = self.target_projector(target_h1)
             target_z2 = self.target_projector(target_h2)
@@ -231,23 +244,24 @@ class BYOL1D(nn.Module):
         return loss
 
     def encode(self, x):
-        return self.online_encoder(x)
-
+        h = self.online_encoder(x)
+        h = self.pool_features(h)
+        return h
 
 def train_byol(
     X_train,
     device,
     repr_dim=320,
-    proj_dim=256,
+    proj_dim=128,
     hidden_dim=512,
-    ema_decay=0.99,
-    n_epochs=30,
+    ema_decay=0.996,
+    n_epochs=100,
     batch_size=128,
-    lr=1e-3,
-    max_shift=10,
-    noise_std=0.05,
-    scale_std=0.1,
-    mask_ratio=0.05,
+    lr=3e-4,
+    max_shift=3,
+    noise_std=0.01,
+    scale_std=0.0,
+    mask_ratio=0.0,
 ):
     model = BYOL1D(
         repr_dim=repr_dim,
@@ -337,25 +351,30 @@ def main():
 
     n_epochs = 100
     batch_size = 128
-    lr = 1e-3
+    lr = 3e-4
 
     repr_dim = 320
-    proj_dim = 256
+    proj_dim = 128
     hidden_dim = 512
-    ema_decay = 0.99
+    ema_decay = 0.996
 
-    max_shift = 10
-    noise_std = 0.05
-    scale_std = 0.1
-    mask_ratio = 0.05
+    max_shift = 3
+    noise_std = 0.01
+    scale_std = 0.0
+    mask_ratio = 0.0
 
     target_byte = 2
     normalize_mode = None
 
     run_name = (
-        f"byol_shift{max_shift}_noise{str(noise_std).replace('.', 'p')}"
-        f"_mask{int(mask_ratio * 100)}_ep{n_epochs}"
-    )
+    f"byol_weakaug_shift{max_shift}"
+    f"_noise{str(noise_std).replace('.', 'p')}"
+    f"_scale{str(scale_std).replace('.', 'p')}"
+    f"_mask{int(mask_ratio * 100)}"
+    f"_ema{str(ema_decay).replace('.', 'p')}"
+    f"_proj{proj_dim}"
+    f"_meanmax_ep{n_epochs}"
+)
 
     figure_dir = PROJECT_ROOT / "outputs" / "figures" / run_name
     repr_dir = PROJECT_ROOT / "outputs" / "representations" / run_name
@@ -524,6 +543,8 @@ def main():
             "scale_std": scale_std,
             "mask_ratio": mask_ratio,
             "normalize": normalize_mode,
+            "representation": "mean+max",
+            "pooled_repr_dim": repr_dim * 2,
             "classifier": "LogisticRegression",
             "linear_probe_train_acc": round(train_acc, 6),
             "target_byte": target_byte,
