@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from sklearn.linear_model import LogisticRegression
 
+from utils.get_device import get_device
 from src.utils.experiment_logger import append_experiment_result
 from src.datasets.ascad_loader import load_ascad_split
 from src.evaluation.rank_eval import (
@@ -23,33 +24,29 @@ if str(TS2VEC_ROOT) not in sys.path:
 
 from ts2vec import TS2Vec
 
+def set_seed(seed=42):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
-def get_device(prefer_mps: bool = False) -> str:
-    """
-    Select PyTorch device.
-
-    Priority:
-        CUDA -> MPS if enabled -> CPU
-    """
     if torch.cuda.is_available():
-        return "cuda"
+        torch.cuda.manual_seed_all(seed)
 
-    if prefer_mps and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return "mps"
-
-    return "cpu"
-
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 
 def main():
     ascad_path = PROJECT_ROOT / "data" / "raw" / "ascad" / "ASCAD.h5"
 
     n_train = 50000
     n_attack = 10000
-    n_epochs = 10
+    n_epochs = 60
     batch_size = 64
     lr = 0.001
     repr_dim = 320
     target_byte = 2
+
+    seed = 42
+    set_seed(seed)
 
     run_name = f"ts2vec_ep{n_epochs}"
 
@@ -153,6 +150,9 @@ def main():
     )
     clf.fit(repr_train, y_train)
 
+    train_acc = float(clf.score(repr_train, y_train))
+    print("Linear probe train accuracy:", train_acc)
+
     print("Predicting attack probabilities...")
     attack_probas_seen = clf.predict_proba(repr_attack)
     attack_probas = expand_proba_to_256(
@@ -164,12 +164,12 @@ def main():
 
     print("Computing key rank curve...")
     ranks = compute_rank_curve(
-    probas=attack_probas,
-    metadata=metadata_attack_small,
-    target_byte=target_byte,
-    max_traces=n_attack,
-    use_log=True,
-)
+            probas=attack_probas,
+            metadata=metadata_attack_small,
+            target_byte=target_byte,
+            max_traces=n_attack,
+            use_log=True,
+        )
 
     print("Final rank:", ranks[-1])
     print("Minimum rank:", ranks.min())
@@ -217,6 +217,7 @@ def main():
             "train_time_ms": round(train_time_ms, 2),
             "final_rank": int(ranks[-1]),
             "min_rank": int(ranks.min()),
+            "linear_probe_train_acc": round(train_acc, 6),
             "rank0_trace": rank0_trace,
             "figure_path": str(rank_path.relative_to(PROJECT_ROOT)),
         },
