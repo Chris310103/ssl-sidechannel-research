@@ -62,11 +62,7 @@
 5. BYOL improved significantly after replacing strong augmentation with weak augmentation and changing representation pooling to mean+max. The best BYOL run reached rank 0 after only 3 attack traces.
 
 ## Plan for Next Week
-* Verify the best-performing configurations with repeated runs to check stability.
-* Compare rank curves across all best methods in one combined plot.
-* Clean up experiment output paths and ensure each run has a unique `run_name`.
-* Prepare a concise summary table for the advisor meeting.
+
 
 ## Blockers
-* Some earlier MAE runs reused the same output directory name, so several rank plots may have been overwritten. Future runs should use unique names such as `mae_patch5_mask30_meanmax_dim320_ep100`.
-```
+
