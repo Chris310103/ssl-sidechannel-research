@@ -222,11 +222,11 @@ def main():
     lr = 1e-4
 
     trace_len = 700
-    patch_size = 10
+    patch_size = 5
     embed_dim = 320
     depth = 4
     num_heads = 8
-    mask_ratio = 0.5
+    mask_ratio = 0.3
     target_byte = 2
     normalize_mode = None
 
