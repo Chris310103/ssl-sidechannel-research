@@ -226,7 +226,7 @@ def main():
     embed_dim = 320
     depth = 4
     num_heads = 8
-    mask_ratio = 0.3
+    mask_ratio = 0.2
     target_byte = 2
     normalize_mode = None
 
