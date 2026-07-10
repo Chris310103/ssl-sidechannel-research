@@ -20,6 +20,24 @@ from src.utils.experiment_logger import append_experiment_result
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+def mae_reconstruction_loss(pred, target, mask, norm_pix_loss=True):
+    """
+    pred:   [B, num_patches, patch_size]
+    target: [B, num_patches, patch_size]
+    mask:   [B, num_patches], 1 means masked patch, 0 means visible patch
+    """
+    if norm_pix_loss:
+        mean = target.mean(dim=-1, keepdim=True)
+        var = target.var(dim=-1, keepdim=True, unbiased=False)
+        target = (target - mean) / torch.sqrt(var + 1e-6)
+
+    loss = (pred - target) ** 2
+    loss = loss.mean(dim=-1)  # [B, num_patches]
+
+    mask = mask.float()
+    loss = (loss * mask).sum() / mask.sum().clamp_min(1.0)
+
+    return loss
 
 class MAE1D(nn.Module):
 
@@ -122,7 +140,13 @@ class MAE1D(nn.Module):
         h = self.encoder(input_tokens)
         recon = self.decoder(h)  # [B, N, P]
 
-        loss = F.mse_loss(recon[mask], patches[mask])
+        loss = mae_reconstruction_loss(
+                pred=recon,
+                target=patches,
+                mask=mask,
+                norm_pix_loss=True,
+            )
+        
         return loss, recon, mask
 
     def encode(self, x):
@@ -130,8 +154,7 @@ class MAE1D(nn.Module):
         tokens = self.patch_embed(patches) + self.pos_embed
         h = self.encoder(tokens)
         return h.mean(dim=1)
-
-
+    
 def train_mae(
     X_train,
     device,
@@ -226,7 +249,7 @@ def main():
     embed_dim = 320
     depth = 4
     num_heads = 8
-    mask_ratio = 0.2
+    mask_ratio = 0.30
     target_byte = 2
     normalize_mode = None
 
