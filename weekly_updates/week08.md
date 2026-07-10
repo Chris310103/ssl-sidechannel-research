@@ -11,17 +11,22 @@
 1. TS2Vec epoch 10  
 ![tsvec epoch 10](week08/figures/ts2vec_ep10/ts2vec_ep10_linear_probe_rank.png)
 
+
 2. TS2Vec epoch 100
 ![tsvec epoch 100](week08/figures/ts2vec_ep100/ts2vec_ep100_linear_probe_rank.png)
+
 
 3. SimCLR epoch 100  
 ![simclr epoch 100](week08/figures/simclr_ep100/simclr_ep100_linear_probe_rank.png)
 
+
 4. CPC epoch 100  
 ![cpc epoch 100](week08/figures/cpc_ref_pred6_neg10_ep100/cpc_ref_pred6_neg10_ep100_linear_probe_rank.png)
 
+
 5. MAE best run  
 ![mae epoch 100](week08/figures/mae_patch5_mask30_dim320_ep100/mae_patch5_mask30_dim320_ep100_linear_probe_rank.png)
+
 
 6. BYOL best run  
 ![byol best run](week08/figures/byol_weakaug_shift3_noise0p01_scale0p0_mask0_ema0p996_proj128_meanmax_ep100/byol_weakaug_shift3_noise0p01_scale0p0_mask0_ema0p996_proj128_meanmax_ep100_linear_probe_rank.png)
