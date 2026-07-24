@@ -1,13 +1,41 @@
-
+from typing import Literal, Optional, Tuple, Union, Dict, Any
 from pathlib import Path
 from typing import Literal, Optional, Tuple, Union, Dict, Any
 
 import h5py
 import numpy as np
 
+TraceWindow = Optional[Tuple[int, int]]
+
+def _apply_trace_window(
+    X: np.ndarray,
+    trace_window: TraceWindow = None,
+) -> np.ndarray:
+    if trace_window is None:
+        return X
+
+    if len(trace_window) != 2:
+        raise ValueError(
+            "trace_window must be a tuple: (window_start, window_end)"
+        )
+
+    window_start, window_end = trace_window
+    trace_length = X.shape[1]
+
+    if window_start < 0:
+        raise ValueError("window_start must be non-negative")
+
+    if window_end <= window_start:
+        raise ValueError("window_end must be greater than window_start")
+
+    if window_end > trace_length:
+        raise ValueError(
+            f"window_end={window_end} exceeds trace length={trace_length}"
+        )
+
+    return X[:, window_start:window_end]
 
 SplitName = Literal["profiling", "attack"]
-
 
 def _resolve_group_name(split: SplitName) -> str:
     
@@ -39,14 +67,14 @@ def _apply_normalization(
 
     raise ValueError(f"Unsupported normalization: {normalize}")
 
-
 def load_ascad_split(
     h5_path: Union[str, Path],
     split: SplitName = "profiling",
     add_channel: bool = True,
     normalize: Optional[Literal["divide128", "zscore"]] = None,
     load_metadata: bool = False,
-) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    trace_window: TraceWindow = None,
+):
     
     h5_path = Path(h5_path)
 
@@ -64,6 +92,11 @@ def load_ascad_split(
         X = np.array(group["traces"], dtype=np.float32)
         y = np.array(group["labels"])
 
+        X = _apply_trace_window(
+            X,
+            trace_window=trace_window,
+        )
+
         X = _apply_normalization(X, normalize=normalize)
 
         if add_channel:
@@ -74,23 +107,6 @@ def load_ascad_split(
             return X, y, metadata
 
     return X, y
-
-
-def load_ascad_for_ts2vec(
-    h5_path: Union[str, Path],
-    split: SplitName = "profiling",
-    normalize: Optional[Literal["divide128", "zscore"]] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
-    
-    X, y = load_ascad_split(
-        h5_path=h5_path,
-        split=split,
-        add_channel=True,
-        normalize=normalize,
-        load_metadata=False,
-    )
-    return X, y
-
 
 def load_ascad_all(
     h5_path: Union[str, Path],
@@ -152,7 +168,14 @@ def load_ascad_all(
 if __name__ == "__main__":
     ascad_path = "data/raw/ascad/ASCAD.h5"
 
-    X, y = load_ascad_for_ts2vec(ascad_path, split="profiling")
+    X, y = load_ascad_split(
+            h5_path=ascad_path,
+            split="profiling",
+            add_channel=True,
+            normalize=None,
+            load_metadata=False,
+            trace_window=None,
+        )
 
     print("X shape:", X.shape)
     print("y shape:", y.shape)

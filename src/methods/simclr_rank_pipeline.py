@@ -1,4 +1,5 @@
 from pathlib import Path
+import random
 import time
 
 import numpy as np
@@ -10,74 +11,89 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from src.datasets.ascad_loader import load_ascad_split
 from src.evaluation.rank_eval import (
-    expand_proba_to_256,
     compute_rank_curve,
+    expand_proba_to_256,
     plot_rank_curve,
 )
-from src.utils.get_device import get_device
+from src.models.cnn_zoo import build_cnn_backbone
 from src.utils.experiment_logger import append_experiment_result
+from src.utils.get_device import get_device
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-class SimCLR1DEncoder(nn.Module):
+def set_seed(seed: int = 42) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
-    def __init__(self, repr_dim: int = 320):
-        super().__init__()
-
-        self.net = nn.Sequential(
-            nn.Conv1d(1, 64, kernel_size=11, stride=2, padding=5),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-
-            nn.Conv1d(64, 128, kernel_size=11, stride=2, padding=5),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-
-            nn.Conv1d(128, 256, kernel_size=11, stride=2, padding=5),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-
-            nn.Conv1d(256, repr_dim, kernel_size=11, stride=2, padding=5),
-            nn.BatchNorm1d(repr_dim),
-            nn.ReLU(),
-
-            nn.AdaptiveAvgPool1d(1),
-        )
-
-    def forward(self, x):
-
-        x = x.transpose(1, 2)
-        h = self.net(x).squeeze(-1)
-        return h
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 class SimCLRModel(nn.Module):
-
-    def __init__(self, repr_dim: int = 320, proj_dim: int = 128):
+    def __init__(
+        self,
+        backbone_name: str = "shared_cnn_v1",
+        pool_mode: str = "mean_max",
+        projector_hidden_dim: int = 320,
+        proj_dim: int = 128,
+    ):
         super().__init__()
-        self.encoder = SimCLR1DEncoder(repr_dim=repr_dim)
+
+        self.backbone_name = backbone_name
+        self.pool_mode = pool_mode
+
+        self.encoder = build_cnn_backbone(
+            name=backbone_name,
+            input_channels=1,
+        )
+
+        self.repr_dim = self.encoder.get_output_dim(
+            pool=pool_mode,
+        )
 
         self.projector = nn.Sequential(
-            nn.Linear(repr_dim, repr_dim),
-            nn.ReLU(),
-            nn.Linear(repr_dim, proj_dim),
+            nn.Linear(
+                self.repr_dim,
+                projector_hidden_dim,
+            ),
+            nn.BatchNorm1d(projector_hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(
+                projector_hidden_dim,
+                proj_dim,
+            ),
         )
 
     def forward(self, x):
-        h = self.encoder(x)
+        h = self.encoder.encode(
+            x,
+            pool=self.pool_mode,
+        )
+
         z = self.projector(h)
         z = F.normalize(z, dim=1)
+
         return h, z
 
+    def encode(self, x):
+        return self.encoder.encode(
+            x,
+            pool=self.pool_mode,
+        )
 
-def random_shift(x, max_shift: int = 10):
 
+def random_shift(
+    x: torch.Tensor,
+    max_shift: int = 10,
+) -> torch.Tensor:
     if max_shift <= 0:
         return x
 
     shifted = torch.empty_like(x)
+
     shifts = torch.randint(
         low=-max_shift,
         high=max_shift + 1,
@@ -86,58 +102,133 @@ def random_shift(x, max_shift: int = 10):
     )
 
     for i, shift in enumerate(shifts):
-        shifted[i] = torch.roll(x[i], shifts=int(shift.item()), dims=0)
+        shifted[i] = torch.roll(
+            x[i],
+            shifts=int(shift.item()),
+            dims=0,
+        )
 
     return shifted
 
 
-def add_gaussian_noise(x, noise_std: float = 0.05):
-    
+def add_gaussian_noise(
+    x: torch.Tensor,
+    noise_std: float = 0.05,
+) -> torch.Tensor:
     if noise_std <= 0:
         return x
 
-    trace_std = x.std(dim=1, keepdim=True).clamp_min(1e-6)
-    noise = torch.randn_like(x) * trace_std * noise_std
+    trace_std = x.std(
+        dim=1,
+        keepdim=True,
+    ).clamp_min(1e-6)
+
+    noise = (
+        torch.randn_like(x)
+        * trace_std
+        * noise_std
+    )
+
     return x + noise
 
 
-def augment_traces(x):
+def augment_traces(
+    x: torch.Tensor,
+    max_shift: int = 10,
+    noise_std: float = 0.05,
+) -> torch.Tensor:
+    x = random_shift(
+        x,
+        max_shift=max_shift,
+    )
 
-    x = random_shift(x, max_shift=10)
-    x = add_gaussian_noise(x, noise_std=0.05)
+    x = add_gaussian_noise(
+        x,
+        noise_std=noise_std,
+    )
+
     return x
 
 
-def nt_xent_loss(z1, z2, temperature: float = 0.2):
+def nt_xent_loss(
+    z1: torch.Tensor,
+    z2: torch.Tensor,
+    temperature: float = 0.2,
+) -> torch.Tensor:
+    if z1.shape != z2.shape:
+        raise ValueError(
+            f"z1 and z2 must have the same shape, "
+            f"received {tuple(z1.shape)} and {tuple(z2.shape)}"
+        )
 
     batch_size = z1.shape[0]
 
-    z = torch.cat([z1, z2], dim=0)  
-    sim = torch.matmul(z, z.T) / temperature  
+    if batch_size < 2:
+        raise ValueError(
+            "NT-Xent loss requires batch_size >= 2"
+        )
 
-    mask = torch.eye(2 * batch_size, device=z.device).bool()
-    sim = sim.masked_fill(mask, -1e9)
+    z = torch.cat(
+        [z1, z2],
+        dim=0,
+    )
 
-    labels = torch.arange(2 * batch_size, device=z.device)
-    labels = (labels + batch_size) % (2 * batch_size)
+    similarity = torch.matmul(
+        z,
+        z.T,
+    ) / temperature
 
-    loss = F.cross_entropy(sim, labels)
-    return loss
+    self_mask = torch.eye(
+        2 * batch_size,
+        dtype=torch.bool,
+        device=z.device,
+    )
+
+    similarity = similarity.masked_fill(
+        self_mask,
+        -1e9,
+    )
+
+    labels = torch.arange(
+        2 * batch_size,
+        device=z.device,
+    )
+
+    labels = (
+        labels + batch_size
+    ) % (2 * batch_size)
+
+    return F.cross_entropy(
+        similarity,
+        labels,
+    )
 
 
 def train_simclr(
     X_train,
     device,
-    repr_dim=320,
-    proj_dim=128,
-    n_epochs=10,
-    batch_size=64,
-    lr=1e-3,
+    backbone_name: str = "shared_cnn_v1",
+    pool_mode: str = "mean_max",
+    projector_hidden_dim: int = 320,
+    proj_dim: int = 128,
+    n_epochs: int = 100,
+    batch_size: int = 64,
+    lr: float = 1e-3,
+    temperature: float = 0.2,
+    max_shift: int = 10,
+    noise_std: float = 0.05,
 ):
-   
-    model = SimCLRModel(repr_dim=repr_dim, proj_dim=proj_dim).to(device)
+    model = SimCLRModel(
+        backbone_name=backbone_name,
+        pool_mode=pool_mode,
+        projector_hidden_dim=projector_hidden_dim,
+        proj_dim=proj_dim,
+    ).to(device)
 
-    dataset = TensorDataset(torch.from_numpy(X_train).float())
+    dataset = TensorDataset(
+        torch.from_numpy(X_train).float()
+    )
+
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -145,139 +236,377 @@ def train_simclr(
         drop_last=True,
     )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=lr,
+    )
 
     loss_log = []
 
+    trainable_params = sum(
+        param.numel()
+        for param in model.parameters()
+        if param.requires_grad
+    )
+
+    backbone_params = sum(
+        param.numel()
+        for param in model.encoder.parameters()
+        if param.requires_grad
+    )
+
+    print(
+        "Shared backbone trainable parameters:",
+        backbone_params,
+    )
+
+    print(
+        "Full SimCLR trainable parameters:",
+        trainable_params,
+    )
+
     model.train()
+
     for epoch in range(n_epochs):
         total_loss = 0.0
         num_batches = 0
 
-        for (batch_x,) in loader:
+        for batch_index, (batch_x,) in enumerate(loader):
             batch_x = batch_x.to(device)
 
-            x1 = augment_traces(batch_x)
-            x2 = augment_traces(batch_x)
+            x1 = augment_traces(
+                batch_x,
+                max_shift=max_shift,
+                noise_std=noise_std,
+            )
 
-            _, z1 = model(x1)
+            x2 = augment_traces(
+                batch_x,
+                max_shift=max_shift,
+                noise_std=noise_std,
+            )
+
+            h1, z1 = model(x1)
             _, z2 = model(x2)
 
-            loss = nt_xent_loss(z1, z2, temperature=0.2)
+            if epoch == 0 and batch_index == 0:
+                temporal_features = (
+                    model.encoder.forward_features(batch_x)
+                )
 
-            optimizer.zero_grad()
+                print(
+                    "Batch input shape:",
+                    batch_x.shape,
+                )
+
+                print(
+                    "Temporal feature shape:",
+                    temporal_features.shape,
+                )
+
+                print(
+                    "Pooled representation shape:",
+                    h1.shape,
+                )
+
+                print(
+                    "Projection shape:",
+                    z1.shape,
+                )
+
+            loss = nt_xent_loss(
+                z1=z1,
+                z2=z2,
+                temperature=temperature,
+            )
+
+            optimizer.zero_grad(
+                set_to_none=True,
+            )
+
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
             num_batches += 1
 
-        avg_loss = total_loss / max(num_batches, 1)
+        avg_loss = (
+            total_loss
+            / max(num_batches, 1)
+        )
+
         loss_log.append(avg_loss)
-        print(f"Epoch #{epoch}: loss={avg_loss:.6f}")
+
+        print(
+            f"Epoch #{epoch}: "
+            f"simclr_loss={avg_loss:.6f}"
+        )
 
     return model, loss_log
 
 
-def encode_representations(model, X, device, batch_size=256):
+def encode_representations(
+    model,
+    X,
+    device,
+    batch_size: int = 256,
+):
+    dataset = TensorDataset(
+        torch.from_numpy(X).float()
+    )
 
-    dataset = TensorDataset(torch.from_numpy(X).float())
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+    )
 
-    reps = []
+    representations = []
 
     model.eval()
+
     with torch.no_grad():
         for (batch_x,) in loader:
             batch_x = batch_x.to(device)
-            h, _ = model(batch_x)
-            reps.append(h.cpu().numpy())
 
-    return np.concatenate(reps, axis=0)
+            h = model.encode(batch_x)
+
+            representations.append(
+                h.cpu().numpy()
+            )
+
+    return np.concatenate(
+        representations,
+        axis=0,
+    )
 
 
 def main():
-    ascad_path = PROJECT_ROOT / "data" / "raw" / "ascad" / "ASCAD.h5"
+    ascad_path = (
+        PROJECT_ROOT
+        / "data"
+        / "raw"
+        / "ascad"
+        / "ASCAD.h5"
+    )
+
+    seed = 42
 
     n_train = 50000
     n_attack = 10000
+
     n_epochs = 100
     batch_size = 64
-    lr = 0.001
-    repr_dim = 320
+    lr = 1e-3
+
+    backbone_name = "shared_cnn_v1"
+    pool_mode = "mean_max"
+
+    encoder_output_channels = 320
+    pooled_repr_dim = 640
+
+    projector_hidden_dim = 320
     proj_dim = 128
+
+    temperature = 0.2
+    max_shift = 10
+    noise_std = 0.05
+
     target_byte = 2
+    normalize_mode = None
 
-    run_name = f"simclr_ep{n_epochs}"
+    trace_window = (0, 700)
+    window_start, window_end = trace_window
+    window_size = window_end - window_start
 
-    figure_dir = PROJECT_ROOT / "outputs" / "figures" / run_name
-    repr_dir = PROJECT_ROOT / "outputs" / "representations" / run_name
-    checkpoint_dir = PROJECT_ROOT / "outputs" / "checkpoints" / run_name
+    set_seed(seed)
 
-    figure_dir.mkdir(parents=True, exist_ok=True)
-    repr_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    run_name = (
+        f"simclr_{backbone_name}"
+        f"_window{window_start}-{window_end}"
+        f"_{pool_mode}"
+        f"_proj{proj_dim}"
+        f"_ep{n_epochs}"
+        f"_seed{seed}"
+    )
 
-    print("Loading ASCAD profiling traces...")
+    figure_dir = (
+        PROJECT_ROOT
+        / "outputs"
+        / "figures"
+        / run_name
+    )
+
+    repr_dir = (
+        PROJECT_ROOT
+        / "outputs"
+        / "representations"
+        / run_name
+    )
+
+    checkpoint_dir = (
+        PROJECT_ROOT
+        / "outputs"
+        / "checkpoints"
+        / run_name
+    )
+
+    figure_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    repr_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    checkpoint_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    print(
+        "Loading ASCAD profiling traces..."
+    )
+
     X_profiling, y_profiling = load_ascad_split(
         h5_path=ascad_path,
         split="profiling",
         add_channel=True,
-        normalize=None,
+        normalize=normalize_mode,
         load_metadata=False,
+        trace_window=trace_window,
     )
 
-    print("Loading ASCAD attack traces with metadata...")
-    X_attack, y_attack, metadata_attack = load_ascad_split(
+    print(
+        "Loading ASCAD attack traces with metadata..."
+    )
+
+    (
+        X_attack,
+        y_attack,
+        metadata_attack,
+    ) = load_ascad_split(
         h5_path=ascad_path,
         split="attack",
         add_channel=True,
-        normalize=None,
+        normalize=normalize_mode,
         load_metadata=True,
+        trace_window=trace_window,
     )
 
     X_train = X_profiling[:n_train]
     y_train = y_profiling[:n_train]
 
     X_attack_small = X_attack[:n_attack]
-    metadata_attack_small = metadata_attack[:n_attack]
 
-    print("X_train shape:", X_train.shape)
-    print("y_train shape:", y_train.shape)
-    print("X_attack shape:", X_attack_small.shape)
-    print("metadata_attack shape:", metadata_attack_small.shape)
+    metadata_attack_small = (
+        metadata_attack[:n_attack]
+    )
 
-    device = get_device(prefer_mps=False)
+    print("Trace window:", trace_window)
+    print("Window size:", window_size)
+
+    print(
+        "X_train shape:",
+        X_train.shape,
+    )
+
+    print(
+        "y_train shape:",
+        y_train.shape,
+    )
+
+    print(
+        "X_attack shape:",
+        X_attack_small.shape,
+    )
+
+    print(
+        "metadata_attack shape:",
+        metadata_attack_small.shape,
+    )
+
+    device = get_device(
+        prefer_mps=False,
+    )
+
     print("Using device:", device)
-
     print("Training SimCLR...")
+
     train_start_time = time.time()
 
     model, loss_log = train_simclr(
         X_train=X_train,
         device=device,
-        repr_dim=repr_dim,
+        backbone_name=backbone_name,
+        pool_mode=pool_mode,
+        projector_hidden_dim=projector_hidden_dim,
         proj_dim=proj_dim,
         n_epochs=n_epochs,
         batch_size=batch_size,
         lr=lr,
+        temperature=temperature,
+        max_shift=max_shift,
+        noise_std=noise_std,
     )
 
     train_end_time = time.time()
-    train_time_sec = train_end_time - train_start_time
-    train_time_ms = 1000 * train_time_sec
 
-    print("SimCLR loss log:", loss_log)
-    print(f"Training start time: {train_start_time}")
-    print(f"Training end time: {train_end_time}")
-    print(f"Training time: {train_time_sec:.2f} sec")
-    print(f"Training time: {train_time_ms:.2f} ms")
+    train_time_sec = (
+        train_end_time
+        - train_start_time
+    )
 
-    checkpoint_path = checkpoint_dir / f"{run_name}_encoder.pt"
-    torch.save(model.state_dict(), checkpoint_path)
-    print("Saved checkpoint to:", checkpoint_path)
+    train_time_ms = (
+        train_time_sec * 1000
+    )
 
-    print("Encoding profiling representations...")
+    print(
+        "SimCLR loss log:",
+        loss_log,
+    )
+
+    print(
+        f"Training start time: "
+        f"{train_start_time}"
+    )
+
+    print(
+        f"Training end time: "
+        f"{train_end_time}"
+    )
+
+    print(
+        f"Training time: "
+        f"{train_time_sec:.2f} sec"
+    )
+
+    print(
+        f"Training time: "
+        f"{train_time_ms:.2f} ms"
+    )
+
+    checkpoint_path = (
+        checkpoint_dir
+        / f"{run_name}_encoder.pt"
+    )
+
+    torch.save(
+        model.state_dict(),
+        checkpoint_path,
+    )
+
+    print(
+        "Saved checkpoint to:",
+        checkpoint_path,
+    )
+
+    print(
+        "Encoding profiling representations..."
+    )
+
     repr_train = encode_representations(
         model=model,
         X=X_train,
@@ -285,7 +614,10 @@ def main():
         batch_size=256,
     )
 
-    print("Encoding attack representations...")
+    print(
+        "Encoding attack representations..."
+    )
+
     repr_attack = encode_representations(
         model=model,
         X=X_attack_small,
@@ -293,30 +625,89 @@ def main():
         batch_size=256,
     )
 
-    print("repr_train shape:", repr_train.shape)
-    print("repr_attack shape:", repr_attack.shape)
+    print(
+        "repr_train shape:",
+        repr_train.shape,
+    )
 
-    np.save(repr_dir / "repr_train.npy", repr_train)
-    np.save(repr_dir / "repr_attack.npy", repr_attack)
-    np.save(repr_dir / "y_train.npy", y_train)
+    print(
+        "repr_attack shape:",
+        repr_attack.shape,
+    )
 
-    print("Training linear classifier on SimCLR representations...")
-    clf = LogisticRegression(
+    if repr_train.shape[1] != pooled_repr_dim:
+        raise ValueError(
+            "Unexpected pooled representation dimension: "
+            f"expected {pooled_repr_dim}, "
+            f"received {repr_train.shape[1]}"
+        )
+
+    np.save(
+        repr_dir / "repr_train.npy",
+        repr_train,
+    )
+
+    np.save(
+        repr_dir / "repr_attack.npy",
+        repr_attack,
+    )
+
+    np.save(
+        repr_dir / "y_train.npy",
+        y_train,
+    )
+
+    print(
+        "Training linear classifier "
+        "on SimCLR representations..."
+    )
+
+    classifier = LogisticRegression(
         max_iter=2000,
         solver="lbfgs",
     )
-    clf.fit(repr_train, y_train)
 
-    print("Predicting attack probabilities...")
-    attack_probas_seen = clf.predict_proba(repr_attack)
-    attack_probas = expand_proba_to_256(
-        attack_probas_seen,
-        classes=clf.classes_,
+    classifier.fit(
+        repr_train,
+        y_train,
     )
 
-    print("attack_probas shape:", attack_probas.shape)
+    train_acc = float(
+        classifier.score(
+            repr_train,
+            y_train,
+        )
+    )
 
-    print("Computing key rank curve...")
+    print(
+        "Linear probe train accuracy:",
+        train_acc,
+    )
+
+    print(
+        "Predicting attack probabilities..."
+    )
+
+    attack_probas_seen = (
+        classifier.predict_proba(
+            repr_attack
+        )
+    )
+
+    attack_probas = expand_proba_to_256(
+        attack_probas_seen,
+        classes=classifier.classes_,
+    )
+
+    print(
+        "attack_probas shape:",
+        attack_probas.shape,
+    )
+
+    print(
+        "Computing key rank curve..."
+    )
+
     ranks = compute_rank_curve(
         probas=attack_probas,
         metadata=metadata_attack_small,
@@ -325,58 +716,145 @@ def main():
         use_log=True,
     )
 
-    print("Final rank:", ranks[-1])
-    print("Minimum rank:", ranks.min())
+    final_rank = int(ranks[-1])
+    min_rank = int(ranks.min())
 
-    rank0_indices = np.where(ranks == 0)[0]
-    rank0_trace = int(rank0_indices[0] + 1) if len(rank0_indices) > 0 else -1
+    rank0_indices = np.where(
+        ranks == 0
+    )[0]
+
+    rank0_trace = (
+        int(rank0_indices[0] + 1)
+        if len(rank0_indices) > 0
+        else -1
+    )
+
+    print("Final rank:", final_rank)
+    print("Minimum rank:", min_rank)
     print("Rank-0 trace:", rank0_trace)
 
-    rank_path = figure_dir / f"{run_name}_linear_probe_rank.png"
-    ranks_path = repr_dir / f"{run_name}_linear_probe_ranks.npy"
+    rank_path = (
+        figure_dir
+        / f"{run_name}_linear_probe_rank.png"
+    )
 
+    ranks_path = (
+        repr_dir
+        / f"{run_name}_linear_probe_ranks.npy"
+    )
 
     plot_rank_curve(
         ranks,
         save_path=rank_path,
-        title="SimCLR + Linear Probe Key Rank",
+        title=(
+            "SimCLR Shared CNN "
+            "+ Linear Probe Key Rank"
+        ),
     )
 
-    np.save(ranks_path, ranks)
+    np.save(
+        ranks_path,
+        ranks,
+    )
 
-    print("Saved rank curve to:", rank_path)
-    print("Saved ranks to:", ranks_path)
+    print(
+        "Saved rank curve to:",
+        rank_path,
+    )
 
-    summary_path = PROJECT_ROOT / "outputs" / "logs" / "experiment_summary.csv"
+    print(
+        "Saved ranks to:",
+        ranks_path,
+    )
+
+    summary_path = (
+        PROJECT_ROOT
+        / "outputs"
+        / "logs"
+        / "experiment_summary.csv"
+    )
+
+    backbone_params = sum(
+        param.numel()
+        for param in model.encoder.parameters()
+        if param.requires_grad
+    )
 
     append_experiment_result(
         summary_path,
         {
-            "method": "SimCLR",
+            "method": "SimCLR-shared-backbone",
+            "run_name": run_name,
             "dataset": "ASCAD.h5",
+            "seed": seed,
             "n_train": n_train,
             "n_attack": n_attack,
             "n_epochs": n_epochs,
             "batch_size": batch_size,
             "lr": lr,
-            "repr_dim": repr_dim,
+            "backbone_name": backbone_name,
+            "backbone_params": backbone_params,
+            "encoder_output_channels": (
+                encoder_output_channels
+            ),
+            "pool_mode": pool_mode,
+            "pooled_repr_dim": (
+                pooled_repr_dim
+            ),
+            "projector_hidden_dim": (
+                projector_hidden_dim
+            ),
             "proj_dim": proj_dim,
-            "classifier": "LogisticRegression",
+            "temperature": temperature,
+            "max_shift": max_shift,
+            "noise_std": noise_std,
+            "normalize": normalize_mode,
+            "window_start": window_start,
+            "window_end": window_end,
+            "window_size": window_size,
+            "classifier": (
+                "LogisticRegression"
+            ),
+            "linear_probe_train_acc": round(
+                train_acc,
+                6,
+            ),
             "target_byte": target_byte,
-            "device": device,
-            "train_start_time": train_start_time,
-            "train_end_time": train_end_time,
-            "train_time_sec": round(train_time_sec, 2),
-            "train_time_ms": round(train_time_ms, 2),
-            "final_rank": int(ranks[-1]),
-            "min_rank": int(ranks.min()),
+            "device": str(device),
+            "train_start_time": (
+                train_start_time
+            ),
+            "train_end_time": (
+                train_end_time
+            ),
+            "train_time_sec": round(
+                train_time_sec,
+                2,
+            ),
+            "train_time_ms": round(
+                train_time_ms,
+                2,
+            ),
+            "final_rank": final_rank,
+            "min_rank": min_rank,
             "rank0_trace": rank0_trace,
-            "figure_path": str(rank_path.relative_to(PROJECT_ROOT)),
-            "checkpoint_path": str(checkpoint_path.relative_to(PROJECT_ROOT)),
+            "figure_path": str(
+                rank_path.relative_to(
+                    PROJECT_ROOT
+                )
+            ),
+            "checkpoint_path": str(
+                checkpoint_path.relative_to(
+                    PROJECT_ROOT
+                )
+            ),
         },
     )
 
-    print("Saved experiment summary to:", summary_path)
+    print(
+        "Saved experiment summary to:",
+        summary_path,
+    )
 
 
 if __name__ == "__main__":
