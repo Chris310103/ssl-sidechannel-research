@@ -1,4 +1,5 @@
 from pathlib import Path
+import random
 import time
 
 import numpy as np
@@ -10,57 +11,55 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from src.datasets.ascad_loader import load_ascad_split
 from src.evaluation.rank_eval import (
-    expand_proba_to_256,
     compute_rank_curve,
+    expand_proba_to_256,
     plot_rank_curve,
 )
-from src.utils.get_device import get_device
+from src.models.cnn_zoo import build_cnn_backbone
 from src.utils.experiment_logger import append_experiment_result
+from src.utils.get_device import get_device
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-class CPCRefEncoder(nn.Module):
-    def __init__(self, input_channels=1, hidden_dim=320):
+def set_seed(seed: int = 42) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+class CPCSharedModel(nn.Module):
+    def __init__(
+        self,
+        backbone_name: str = "shared_cnn_v1",
+        pool_mode: str = "mean_max",
+        context_dim: int = 320,
+        prediction_steps: int = 6,
+    ):
         super().__init__()
 
-        self.net = nn.Sequential(
-            nn.Conv1d(input_channels, hidden_dim, kernel_size=10, stride=2, padding=4),
-            nn.ReLU(),
+        self.backbone_name = backbone_name
+        self.pool_mode = pool_mode
+        self.context_dim = context_dim
+        self.prediction_steps = prediction_steps
 
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=8, stride=2, padding=3),
-            nn.ReLU(),
-
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-
-            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=4, stride=1, padding=1),
-            nn.ReLU(),
+        self.encoder = build_cnn_backbone(
+            name=backbone_name,
+            input_channels=1,
         )
 
-    def forward(self, x):
+        self.latent_dim = self.encoder.output_channels
 
-        x = x.transpose(1, 2)
-        z = self.net(x)
-        z = z.transpose(1, 2)
-        return z
-
-
-class CPCRefModel(nn.Module):
-    def __init__(self, repr_dim=320, context_dim=320, prediction_steps=12):
-        super().__init__()
-
-        self.encoder = CPCRefEncoder(
-            input_channels=1,
-            hidden_dim=repr_dim,
+        self.pooled_repr_dim = self.encoder.get_output_dim(
+            pool=pool_mode,
         )
 
         self.gru = nn.GRU(
-            input_size=repr_dim,
+            input_size=self.latent_dim,
             hidden_size=context_dim,
             num_layers=1,
             batch_first=True,
@@ -68,126 +67,189 @@ class CPCRefModel(nn.Module):
 
         self.predictor = nn.Linear(
             context_dim,
-            repr_dim * prediction_steps,
+            self.latent_dim * prediction_steps,
             bias=False,
         )
 
-        self.repr_dim = repr_dim
-        self.context_dim = context_dim
-        self.prediction_steps = prediction_steps
-
     def forward(self, x):
-        z = self.encoder(x)
+        z = self.encoder.forward_features(x)
+
         c, _ = self.gru(z)
-        pred = self.predictor(c)
-        return z, c, pred
 
-    def encode(self, x, mode="context_mean"):
-        z, c, _ = self.forward(x)
+        prediction = self.predictor(c)
 
-        if mode == "context_mean":
-            return c.mean(dim=1)
+        return z, c, prediction
 
-        if mode == "latent_mean":
-            return z.mean(dim=1)
-
-        if mode == "context_last":
-            return c[:, -1, :]
-
-        if mode == "concat":
-            return torch.cat(
-                [
-                    c.mean(dim=1),
-                    c[:, -1, :],
-                    z.mean(dim=1),
-                ],
-                dim=1,
-            )
-        
-        raise ValueError(f"Unknown encode mode: {mode}")
-
-def cpc_ref_loss(
-    z,
-    pred,
-    prediction_steps=12,
-    negative_samples=10,
-):
-
-    batch_size, seq_len, repr_dim = z.shape
-    device = z.device
-
-    if seq_len <= prediction_steps + 1:
-        raise ValueError(
-            f"Sequence length {seq_len} too short for prediction_steps={prediction_steps}"
+    def encode(self, x):
+        return self.encoder.encode(
+            x,
+            pool=self.pool_mode,
         )
 
-    total_loss = 0.0
-    total_acc = 0.0
+
+def cpc_reference_loss(
+    z: torch.Tensor,
+    prediction: torch.Tensor,
+    prediction_steps: int = 6,
+    negative_samples: int = 10,
+):
+    batch_size, sequence_length, latent_dim = z.shape
+    device = z.device
+
+    if sequence_length <= prediction_steps:
+        raise ValueError(
+            f"Sequence length {sequence_length} is too short "
+            f"for prediction_steps={prediction_steps}"
+        )
+
+    if negative_samples < 1:
+        raise ValueError(
+            "negative_samples must be at least 1"
+        )
+
+    latent_pool = z.reshape(
+        batch_size * sequence_length,
+        latent_dim,
+    )
+
+    pool_size = latent_pool.size(0)
+
+    total_loss = z.new_tensor(0.0)
+    total_accuracy = 0.0
     loss_count = 0
 
-    z_pool = z.reshape(-1, repr_dim)
+    for step in range(1, prediction_steps + 1):
+        prediction_step = prediction[
+            :,
+            :-step,
+            (step - 1) * latent_dim : step * latent_dim,
+        ]
 
-    for k in range(1, prediction_steps + 1):
+        target_step = z[
+            :,
+            step:,
+            :,
+        ]
 
-        pred_k = pred[:, :-k, (k - 1) * repr_dim : k * repr_dim]
+        prediction_flat = prediction_step.reshape(
+            -1,
+            latent_dim,
+        )
 
-        target_k = z[:, k:, :]
+        target_flat = target_step.reshape(
+            -1,
+            latent_dim,
+        )
 
-        pred_k = pred_k.reshape(-1, repr_dim)      
-        target_k = target_k.reshape(-1, repr_dim)  
-        n_pos = pred_k.size(0)
+        number_of_predictions = prediction_flat.size(0)
 
-        
-        pos_score = torch.sum(pred_k * target_k, dim=1, keepdim=True)
+        positive_scores = torch.sum(
+            prediction_flat * target_flat,
+            dim=1,
+            keepdim=True,
+        )
 
-        neg_indices = torch.randint(
-            low=0,
-            high=z_pool.size(0),
-            size=(n_pos, negative_samples),
+        target_times = torch.arange(
+            step,
+            sequence_length,
             device=device,
         )
 
-        neg_z = z_pool[neg_indices]  
+        batch_offsets = (
+            torch.arange(
+                batch_size,
+                device=device,
+            ).unsqueeze(1)
+            * sequence_length
+        )
 
-        neg_score = torch.bmm(
-            neg_z,
-            pred_k.unsqueeze(2),
+        positive_pool_indices = (
+            batch_offsets
+            + target_times.unsqueeze(0)
+        ).reshape(-1)
+
+        negative_offsets = torch.randint(
+            low=1,
+            high=pool_size,
+            size=(
+                number_of_predictions,
+                negative_samples,
+            ),
+            device=device,
+        )
+
+        negative_indices = (
+            positive_pool_indices.unsqueeze(1)
+            + negative_offsets
+        ) % pool_size
+
+        negative_latents = latent_pool[
+            negative_indices
+        ]
+
+        negative_scores = torch.bmm(
+            negative_latents,
+            prediction_flat.unsqueeze(2),
         ).squeeze(2)
 
-        logits = torch.cat([pos_score, neg_score], dim=1)
+        logits = torch.cat(
+            [
+                positive_scores,
+                negative_scores,
+            ],
+            dim=1,
+        )
 
-        labels = torch.zeros(n_pos, dtype=torch.long, device=device)
+        labels = torch.zeros(
+            number_of_predictions,
+            dtype=torch.long,
+            device=device,
+        )
 
-        loss = F.cross_entropy(logits, labels)
+        loss = F.cross_entropy(
+            logits,
+            labels,
+        )
 
         with torch.no_grad():
-            acc = (logits.argmax(dim=1) == labels).float().mean()
+            accuracy = (
+                logits.argmax(dim=1)
+                == labels
+            ).float().mean()
 
         total_loss = total_loss + loss
-        total_acc = total_acc + acc.item()
+        total_accuracy += accuracy.item()
         loss_count += 1
 
-    return total_loss / loss_count, total_acc / loss_count
+    average_loss = total_loss / loss_count
+    average_accuracy = total_accuracy / loss_count
+
+    return average_loss, average_accuracy
 
 
-def train_cpc_ref(
+def train_cpc(
     X_train,
     device,
-    repr_dim=320,
-    context_dim=320,
-    prediction_steps=12,
-    negative_samples=10,
-    n_epochs=10,
-    batch_size=64,
-    lr=2e-4,
+    backbone_name: str = "shared_cnn_v1",
+    pool_mode: str = "mean_max",
+    context_dim: int = 320,
+    prediction_steps: int = 6,
+    negative_samples: int = 10,
+    n_epochs: int = 100,
+    batch_size: int = 64,
+    lr: float = 2e-4,
 ):
-    model = CPCRefModel(
-        repr_dim=repr_dim,
+    model = CPCSharedModel(
+        backbone_name=backbone_name,
+        pool_mode=pool_mode,
         context_dim=context_dim,
         prediction_steps=prediction_steps,
     ).to(device)
 
-    dataset = TensorDataset(torch.from_numpy(X_train).float())
+    dataset = TensorDataset(
+        torch.from_numpy(X_train).float()
+    )
+
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -195,84 +257,189 @@ def train_cpc_ref(
         drop_last=True,
     )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=lr,
+    )
 
-    loss_log = []
-    acc_log = []
+    backbone_params = sum(
+        parameter.numel()
+        for parameter in model.encoder.parameters()
+        if parameter.requires_grad
+    )
+
+    full_model_params = sum(
+        parameter.numel()
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    )
+
+    print(
+        "Shared backbone trainable parameters:",
+        backbone_params,
+    )
+
+    print(
+        "Full CPC trainable parameters:",
+        full_model_params,
+    )
+
+    model.eval()
+
+    with torch.no_grad():
+        sample_x = torch.from_numpy(
+            X_train[:8]
+        ).float().to(device)
+
+        sample_z, sample_c, sample_prediction = model(
+            sample_x
+        )
+
+        sample_representation = model.encode(
+            sample_x
+        )
+
+    print(
+        "Sample input shape:",
+        sample_x.shape,
+    )
+
+    print(
+        "Latent sequence shape:",
+        sample_z.shape,
+    )
+
+    print(
+        "Context sequence shape:",
+        sample_c.shape,
+    )
+
+    print(
+        "Prediction shape:",
+        sample_prediction.shape,
+    )
+
+    print(
+        "Downstream representation shape:",
+        sample_representation.shape,
+    )
 
     model.train()
 
+    loss_log = []
+    accuracy_log = []
+
     for epoch in range(n_epochs):
         total_loss = 0.0
-        total_acc = 0.0
-        num_batches = 0
+        total_accuracy = 0.0
+        number_of_batches = 0
 
         for (batch_x,) in loader:
             batch_x = batch_x.to(device)
 
-            z, c, pred = model(batch_x)
+            z, _, prediction = model(
+                batch_x
+            )
 
-            if epoch == 0 and num_batches == 0:
-                print("z shape:", z.shape)
-                print("c shape:", c.shape)
-                print("pred shape:", pred.shape)
-
-
-            loss, acc = cpc_ref_loss(
+            loss, cpc_accuracy = cpc_reference_loss(
                 z=z,
-                pred=pred,
+                prediction=prediction,
                 prediction_steps=prediction_steps,
                 negative_samples=negative_samples,
             )
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(
+                set_to_none=True,
+            )
+
             loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=1.0,
+            )
+
             optimizer.step()
 
             total_loss += loss.item()
-            total_acc += acc
-            num_batches += 1
+            total_accuracy += cpc_accuracy
+            number_of_batches += 1
 
-        avg_loss = total_loss / max(num_batches, 1)
-        avg_acc = total_acc / max(num_batches, 1)
+        average_loss = (
+            total_loss
+            / max(number_of_batches, 1)
+        )
 
-        loss_log.append(avg_loss)
-        acc_log.append(avg_acc)
+        average_accuracy = (
+            total_accuracy
+            / max(number_of_batches, 1)
+        )
 
-        print(f"Epoch #{epoch}: loss={avg_loss:.6f}, cpc_acc={avg_acc:.4f}")
+        loss_log.append(
+            average_loss
+        )
 
-    return model, loss_log, acc_log
+        accuracy_log.append(
+            average_accuracy
+        )
+
+        print(
+            f"Epoch #{epoch}: "
+            f"cpc_loss={average_loss:.6f}, "
+            f"cpc_acc={average_accuracy:.4f}"
+        )
+
+    return model, loss_log, accuracy_log
 
 
-def encode_representations(model, X, device, batch_size=256):
-    dataset = TensorDataset(torch.from_numpy(X).float())
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+def encode_representations(
+    model,
+    X,
+    device,
+    batch_size: int = 256,
+):
+    dataset = TensorDataset(
+        torch.from_numpy(X).float()
+    )
 
-    reps = []
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+    )
+
+    representations = []
 
     model.eval()
 
     with torch.no_grad():
         for (batch_x,) in loader:
             batch_x = batch_x.to(device)
-            h = model.encode(batch_x)
-            reps.append(h.cpu().numpy())
 
-    return np.concatenate(reps, axis=0)
+            representation = model.encode(
+                batch_x
+            )
+
+            representations.append(
+                representation.cpu().numpy()
+            )
+
+    return np.concatenate(
+        representations,
+        axis=0,
+    )
 
 
 def main():
-    ascad_path = PROJECT_ROOT / "data" / "raw" / "ascad" / "ASCAD.h5"
+    ascad_path = (
+        PROJECT_ROOT
+        / "data"
+        / "raw"
+        / "ascad"
+        / "ASCAD.h5"
+    )
 
-    run_name= "cpc_ref_pred6_neg10_ep100"
-
-    figure_dir = PROJECT_ROOT / "outputs" / "figures" / run_name
-    repr_dir = PROJECT_ROOT / "outputs" / "representations" / run_name
-    checkpoint_dir = PROJECT_ROOT / "outputs" / "checkpoints" / run_name
-
-    figure_dir.mkdir(parents=True, exist_ok=True)
-    repr_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    seed = 42
 
     n_train = 50000
     n_attack = 10000
@@ -281,76 +448,229 @@ def main():
     batch_size = 64
     lr = 2e-4
 
-    repr_dim = 320
+    backbone_name = "shared_cnn_v1"
+    pool_mode = "mean_max"
+
     context_dim = 320
     prediction_steps = 6
     negative_samples = 10
 
     target_byte = 2
+    normalize_mode = None
 
-    print("Loading ASCAD profiling traces...")
+    trace_window = (0, 700)
+
+    window_start, window_end = trace_window
+    window_size = window_end - window_start
+
+    set_seed(seed)
+
+    run_name = (
+        f"cpc_{backbone_name}"
+        f"_window{window_start}-{window_end}"
+        f"_{pool_mode}"
+        f"_context{context_dim}"
+        f"_pred{prediction_steps}"
+        f"_neg{negative_samples}"
+        f"_ep{n_epochs}"
+        f"_seed{seed}"
+    )
+
+    figure_dir = (
+        PROJECT_ROOT
+        / "outputs"
+        / "figures"
+        / run_name
+    )
+
+    representation_dir = (
+        PROJECT_ROOT
+        / "outputs"
+        / "representations"
+        / run_name
+    )
+
+    checkpoint_dir = (
+        PROJECT_ROOT
+        / "outputs"
+        / "checkpoints"
+        / run_name
+    )
+
+    figure_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    representation_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    checkpoint_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    print(
+        "Loading ASCAD profiling traces..."
+    )
+
     X_profiling, y_profiling = load_ascad_split(
         h5_path=ascad_path,
         split="profiling",
         add_channel=True,
-        normalize=None,
+        normalize=normalize_mode,
         load_metadata=False,
+        trace_window=trace_window,
     )
 
-    print("Loading ASCAD attack traces with metadata...")
-    X_attack, y_attack, metadata_attack = load_ascad_split(
+    print(
+        "Loading ASCAD attack traces "
+        "with metadata..."
+    )
+
+    (
+        X_attack,
+        y_attack,
+        metadata_attack,
+    ) = load_ascad_split(
         h5_path=ascad_path,
         split="attack",
         add_channel=True,
-        normalize=None,
+        normalize=normalize_mode,
         load_metadata=True,
+        trace_window=trace_window,
     )
 
     X_train = X_profiling[:n_train]
     y_train = y_profiling[:n_train]
 
     X_attack_small = X_attack[:n_attack]
-    metadata_attack_small = metadata_attack[:n_attack]
 
-    print("X_train shape:", X_train.shape)
-    print("y_train shape:", y_train.shape)
-    print("X_attack shape:", X_attack_small.shape)
-    print("metadata_attack shape:", metadata_attack_small.shape)
+    metadata_attack_small = (
+        metadata_attack[:n_attack]
+    )
 
-    device = get_device(prefer_mps=False)
-    print("Using device:", device)
+    print(
+        "Trace window:",
+        trace_window,
+    )
 
-    print("Training CPC...")
+    print(
+        "Window size:",
+        window_size,
+    )
+
+    print(
+        "X_train shape:",
+        X_train.shape,
+    )
+
+    print(
+        "y_train shape:",
+        y_train.shape,
+    )
+
+    print(
+        "X_attack shape:",
+        X_attack_small.shape,
+    )
+
+    print(
+        "metadata_attack shape:",
+        metadata_attack_small.shape,
+    )
+
+    device = get_device(
+        prefer_mps=False,
+    )
+
+    print(
+        "Using device:",
+        device,
+    )
+
+    print(
+        "Training CPC..."
+    )
 
     train_start_time = time.time()
 
-    model, loss_log, acc_log = train_cpc_ref(
-    X_train=X_train,
-    device=device,
-    repr_dim=repr_dim,
-    context_dim=context_dim,
-    prediction_steps=prediction_steps,
-    negative_samples=negative_samples,
-    n_epochs=n_epochs,
-    batch_size=batch_size,
-    lr=lr,
-)
+    model, loss_log, accuracy_log = train_cpc(
+        X_train=X_train,
+        device=device,
+        backbone_name=backbone_name,
+        pool_mode=pool_mode,
+        context_dim=context_dim,
+        prediction_steps=prediction_steps,
+        negative_samples=negative_samples,
+        n_epochs=n_epochs,
+        batch_size=batch_size,
+        lr=lr,
+    )
+
     train_end_time = time.time()
-    train_time_sec = train_end_time - train_start_time
-    train_time_ms = 1000 * train_time_sec
 
-    print("CPC loss log:", loss_log)
-    print(f"Training start time: {train_start_time}")
-    print(f"Training end time: {train_end_time}")
-    print(f"Training time: {train_time_sec:.2f} sec")
-    print(f"Training time: {train_time_ms:.2f} ms")
+    train_time_sec = (
+        train_end_time
+        - train_start_time
+    )
 
-    checkpoint_path = checkpoint_dir / f"{run_name}_encoder.pt"
+    train_time_ms = (
+        train_time_sec
+        * 1000
+    )
 
-    torch.save(model.state_dict(), checkpoint_path)
-    print("Saved checkpoint to:", checkpoint_path)
+    print(
+        "CPC loss log:",
+        loss_log,
+    )
 
-    print("Encoding profiling representations...")
+    print(
+        "CPC accuracy log:",
+        accuracy_log,
+    )
+
+    print(
+        f"Training start time: "
+        f"{train_start_time}"
+    )
+
+    print(
+        f"Training end time: "
+        f"{train_end_time}"
+    )
+
+    print(
+        f"Training time: "
+        f"{train_time_sec:.2f} sec"
+    )
+
+    print(
+        f"Training time: "
+        f"{train_time_ms:.2f} ms"
+    )
+
+    checkpoint_path = (
+        checkpoint_dir
+        / f"{run_name}_encoder.pt"
+    )
+
+    torch.save(
+        model.state_dict(),
+        checkpoint_path,
+    )
+
+    print(
+        "Saved checkpoint to:",
+        checkpoint_path,
+    )
+
+    print(
+        "Encoding profiling representations..."
+    )
+
     repr_train = encode_representations(
         model=model,
         X=X_train,
@@ -358,7 +678,10 @@ def main():
         batch_size=256,
     )
 
-    print("Encoding attack representations...")
+    print(
+        "Encoding attack representations..."
+    )
+
     repr_attack = encode_representations(
         model=model,
         X=X_attack_small,
@@ -366,92 +689,271 @@ def main():
         batch_size=256,
     )
 
-    print("repr_train shape:", repr_train.shape)
-    print("repr_attack shape:", repr_attack.shape)
+    print(
+        "repr_train shape:",
+        repr_train.shape,
+    )
 
-    np.save(repr_dir / "repr_train.npy", repr_train)
-    np.save(repr_dir / "repr_attack.npy", repr_attack)
-    np.save(repr_dir / "y_train.npy", y_train)
+    print(
+        "repr_attack shape:",
+        repr_attack.shape,
+    )
 
-    print("Training linear classifier on CPC representations...")
-    clf = LogisticRegression(
+    expected_repr_dim = (
+        model.pooled_repr_dim
+    )
+
+    if repr_train.shape[1] != expected_repr_dim:
+        raise ValueError(
+            "Unexpected representation dimension: "
+            f"expected {expected_repr_dim}, "
+            f"received {repr_train.shape[1]}"
+        )
+
+    np.save(
+        representation_dir / "repr_train.npy",
+        repr_train,
+    )
+
+    np.save(
+        representation_dir / "repr_attack.npy",
+        repr_attack,
+    )
+
+    np.save(
+        representation_dir / "y_train.npy",
+        y_train,
+    )
+
+    print(
+        "Training linear classifier "
+        "on CPC shared-backbone representations..."
+    )
+
+    classifier = LogisticRegression(
         max_iter=2000,
         solver="lbfgs",
     )
-    clf.fit(repr_train, y_train)
 
-    print("Predicting attack probabilities...")
-    attack_probas_seen = clf.predict_proba(repr_attack)
-    attack_probas = expand_proba_to_256(
-        attack_probas_seen,
-        classes=clf.classes_,
+    classifier.fit(
+        repr_train,
+        y_train,
     )
 
-    print("attack_probas shape:", attack_probas.shape)
+    train_accuracy = float(
+        classifier.score(
+            repr_train,
+            y_train,
+        )
+    )
 
-    print("Computing key rank curve...")
+    print(
+        "Linear probe train accuracy:",
+        train_accuracy,
+    )
+
+    print(
+        "Predicting attack probabilities..."
+    )
+
+    attack_probabilities_seen = (
+        classifier.predict_proba(
+            repr_attack
+        )
+    )
+
+    attack_probabilities = expand_proba_to_256(
+        attack_probabilities_seen,
+        classes=classifier.classes_,
+    )
+
+    print(
+        "attack_probas shape:",
+        attack_probabilities.shape,
+    )
+
+    print(
+        "Computing key rank curve..."
+    )
+
     ranks = compute_rank_curve(
-        probas=attack_probas,
+        probas=attack_probabilities,
         metadata=metadata_attack_small,
         target_byte=target_byte,
         max_traces=n_attack,
         use_log=True,
     )
 
-    print("Final rank:", ranks[-1])
-    print("Minimum rank:", ranks.min())
+    final_rank = int(
+        ranks[-1]
+    )
 
-    rank0_indices = np.where(ranks == 0)[0]
-    rank0_trace = int(rank0_indices[0] + 1) if len(rank0_indices) > 0 else -1
+    minimum_rank = int(
+        ranks.min()
+    )
 
-    print("Rank-0 trace:", rank0_trace)
+    rank_zero_indices = np.where(
+        ranks == 0
+    )[0]
 
-    rank_path = figure_dir / f"{run_name}_linear_probe_rank.png"
-    ranks_path = repr_dir / f"{run_name}_linear_probe_ranks.npt"
+    rank_zero_trace = (
+        int(rank_zero_indices[0] + 1)
+        if len(rank_zero_indices) > 0
+        else -1
+    )
+
+    print(
+        "Final rank:",
+        final_rank,
+    )
+
+    print(
+        "Minimum rank:",
+        minimum_rank,
+    )
+
+    print(
+        "Rank-0 trace:",
+        rank_zero_trace,
+    )
+
+    rank_path = (
+        figure_dir
+        / f"{run_name}_linear_probe_rank.png"
+    )
+
+    ranks_path = (
+        representation_dir
+        / f"{run_name}_linear_probe_ranks.npy"
+    )
 
     plot_rank_curve(
         ranks,
         save_path=rank_path,
-        title="CPC-ref + Linear Probe Key Rank"
+        title=(
+            "CPC Shared CNN "
+            "+ Linear Probe Key Rank"
+        ),
     )
 
-    np.save(ranks_path, ranks)
+    np.save(
+        ranks_path,
+        ranks,
+    )
 
-    print("Saved rank curve to:", rank_path)
-    print("Saved ranks to:", ranks_path)
+    print(
+        "Saved rank curve to:",
+        rank_path,
+    )
 
-    summary_path = PROJECT_ROOT / "outputs" / "logs" / "experiment_summary.csv"
+    print(
+        "Saved ranks to:",
+        ranks_path,
+    )
+
+    summary_path = (
+        PROJECT_ROOT
+        / "outputs"
+        / "logs"
+        / "experiment_summary.csv"
+    )
+
+    backbone_params = sum(
+        parameter.numel()
+        for parameter in model.encoder.parameters()
+        if parameter.requires_grad
+    )
+
+    full_model_params = sum(
+        parameter.numel()
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    )
 
     append_experiment_result(
         summary_path,
         {
-            "method": "CPC-ref",
+            "method": "CPC-shared-backbone",
+            "run_name": run_name,
             "dataset": "ASCAD.h5",
+            "seed": seed,
             "n_train": n_train,
             "n_attack": n_attack,
             "n_epochs": n_epochs,
             "batch_size": batch_size,
             "lr": lr,
-            "repr_dim": repr_dim,
-            "prediction_steps": prediction_steps,
-            "negative_samples": negative_samples,
+            "backbone_name": backbone_name,
+            "backbone_params": backbone_params,
+            "full_model_params": full_model_params,
+            "encoder_output_channels": (
+                model.latent_dim
+            ),
+            "pool_mode": pool_mode,
+            "pooled_repr_dim": (
+                model.pooled_repr_dim
+            ),
             "context_dim": context_dim,
-            "classifier": "LogisticRegression",
+            "prediction_steps": (
+                prediction_steps
+            ),
+            "negative_samples": (
+                negative_samples
+            ),
+            "normalize": normalize_mode,
+            "window_start": window_start,
+            "window_end": window_end,
+            "window_size": window_size,
+            "classifier": (
+                "LogisticRegression"
+            ),
+            "linear_probe_train_acc": round(
+                train_accuracy,
+                6,
+            ),
             "target_byte": target_byte,
-            "device": device,
-            "train_start_time": train_start_time,
-            "train_end_time": train_end_time,
-            "train_time_sec": round(train_time_sec, 2),
-            "train_time_ms": round(train_time_ms, 2),
-            "final_rank": int(ranks[-1]),
-            "min_rank": int(ranks.min()),
-            "rank0_trace": rank0_trace,
-            "figure_path": str(rank_path.relative_to(PROJECT_ROOT)),
-            "checkpoint_path": str(checkpoint_path.relative_to(PROJECT_ROOT)),
+            "device": str(device),
+            "final_cpc_loss": round(
+                loss_log[-1],
+                6,
+            ),
+            "final_cpc_acc": round(
+                accuracy_log[-1],
+                6,
+            ),
+            "train_start_time": (
+                train_start_time
+            ),
+            "train_end_time": (
+                train_end_time
+            ),
+            "train_time_sec": round(
+                train_time_sec,
+                2,
+            ),
+            "train_time_ms": round(
+                train_time_ms,
+                2,
+            ),
+            "final_rank": final_rank,
+            "min_rank": minimum_rank,
+            "rank0_trace": rank_zero_trace,
+            "figure_path": str(
+                rank_path.relative_to(
+                    PROJECT_ROOT
+                )
+            ),
+            "checkpoint_path": str(
+                checkpoint_path.relative_to(
+                    PROJECT_ROOT
+                )
+            ),
         },
     )
 
-    print("Saved experiment summary to:", summary_path)
+    print(
+        "Saved experiment summary to:",
+        summary_path,
+    )
 
 
 if __name__ == "__main__":
