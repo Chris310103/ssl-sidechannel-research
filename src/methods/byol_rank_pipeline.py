@@ -179,8 +179,8 @@ class MLPHead(nn.Module):
 class BYOL1D(nn.Module):
     def __init__(
         self,
-        backbone_name: str = "shared_cnn_v1",
-        pool_mode: str = "mean_max",
+        backbone_name: str = "triplet_cnn_v1",
+        pool_mode: str = "identity",
         proj_dim: int = 128,
         hidden_dim: int = 512,
         ema_decay: float = 0.996,
@@ -196,13 +196,16 @@ class BYOL1D(nn.Module):
         self.online_encoder = build_cnn_backbone(
             name=backbone_name,
             input_channels=1,
+            input_length=700,
         )
 
-        self.pooled_repr_dim = (
+        self.repr_dim = (
             self.online_encoder.get_output_dim(
                 pool=pool_mode,
             )
         )
+
+        self.pooled_repr_dim = self.repr_dim
 
         self.online_projector = MLPHead(
             input_dim=self.pooled_repr_dim,
@@ -360,8 +363,8 @@ class BYOL1D(nn.Module):
 def train_byol(
     X_train,
     device,
-    backbone_name: str = "shared_cnn_v1",
-    pool_mode: str = "mean_max",
+    backbone_name: str = "triplet_cnn_v1",
+    pool_mode: str = "identity",
     proj_dim: int = 128,
     hidden_dim: int = 512,
     ema_decay: float = 0.996,
@@ -415,7 +418,7 @@ def train_byol(
     )
 
     print(
-        "Shared backbone trainable parameters:",
+        "Backbone trainable parameters:",
         backbone_params,
     )
 
@@ -464,7 +467,7 @@ def train_byol(
     )
 
     print(
-        "Pooled representation shape:",
+        "Backbone representation shape:",
         pooled_features.shape,
     )
 
@@ -605,8 +608,10 @@ def main():
     batch_size = 128
     lr = 3e-4
 
-    backbone_name = "shared_cnn_v1"
-    pool_mode = "mean_max"
+    backbone_name = "triplet_cnn_v1"
+    pool_mode = "identity"
+
+    encoder_output_channels = 512
 
     proj_dim = 128
     hidden_dim = 512
@@ -1002,7 +1007,7 @@ def main():
         ranks,
         save_path=rank_path,
         title=(
-            "BYOL Shared CNN "
+            "BYOL Triplet CNN Backbone "
             "+ Linear Probe Key Rank"
         ),
     )
@@ -1039,7 +1044,7 @@ def main():
     append_experiment_result(
         summary_path,
         {
-            "method": "BYOL-shared-backbone",
+            "method": "BYOL-triplet-backbone",
             "run_name": run_name,
             "dataset": "ASCAD.h5",
             "seed": seed,
@@ -1051,7 +1056,7 @@ def main():
             "backbone_name": backbone_name,
             "backbone_params": backbone_params,
             "encoder_output_channels": (
-                model.online_encoder.output_channels
+                encoder_output_channels
             ),
             "pool_mode": pool_mode,
             "pooled_repr_dim": (
