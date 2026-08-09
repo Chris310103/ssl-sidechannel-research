@@ -740,8 +740,9 @@ def main():
     hidden_dim = 512
     ema_decay = 0.996
 
-    max_shift = 3
-    noise_std = 0.01
+    max_shift = 10
+    noise_std = 0.05
+
     scale_std = 0.0
     mask_ratio = 0.0
 
@@ -766,7 +767,7 @@ def main():
         f"_window{window_start}-{window_end}"
         f"_{pool_mode}"
         f"_scheduled"
-        f"_weakaug"
+        f"_simclr_aug"
         f"_shift{max_shift}"
         f"_noise{str(noise_std).replace('.', 'p')}"
         f"_ema{str(ema_decay).replace('.', 'p')}"
