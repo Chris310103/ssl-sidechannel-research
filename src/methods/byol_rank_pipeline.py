@@ -617,7 +617,7 @@ def main():
     n_train = 50000
     n_attack = 10000
 
-    n_epochs = 10
+    n_epochs = 100
     batch_size = 128
     lr = 1e-4
 
