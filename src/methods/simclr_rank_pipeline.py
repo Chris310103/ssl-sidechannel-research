@@ -15,7 +15,7 @@ from src.evaluation.rank_eval import (
     expand_proba_to_256,
     plot_rank_curve,
 )
-from src.models.cnn_zoo import build_cnn_backbone, pool_temporal
+from src.models.cnn_zoo import build_cnn_backbone
 from src.utils.experiment_logger import append_experiment_result
 from src.utils.get_device import get_device
 
@@ -31,68 +31,36 @@ def set_seed(seed: int = 42) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+
 class SimCLRModel(nn.Module):
     def __init__(
         self,
-        embedding_dim: int = 256,
-        projector_hidden_dim: int = 320,
-        proj_dim: int = 128,
+        backbone_name,
+        pool_mode,
+        projector_hidden_dim,
+        proj_dim,
     ):
         super().__init__()
 
+        self.backbone_name = backbone_name
+        self.pool_mode = pool_mode
+
         self.encoder = build_cnn_backbone(
+            name=backbone_name,
             input_channels=1,
-            input_length=700,
         )
 
-        self.embedding_dim = embedding_dim
-        self.repr_dim = embedding_dim
-
-        temporal_channels = (
-            self.encoder.get_output_channels()
-        )
-
-        temporal_length = (
-            self.encoder.get_temporal_length()
-        )
-
-        flatten_dim = (
-            temporal_channels
-            * temporal_length
-        )
-
-        self.embedding_head = nn.Sequential(
-            nn.Flatten(),
-
-            nn.Linear(
-                flatten_dim,
-                4096,
-            ),
-            nn.ReLU(inplace=True),
-
-            nn.Linear(
-                4096,
-                4096,
-            ),
-            nn.ReLU(inplace=True),
-
-            nn.Linear(
-                4096,
-                embedding_dim,
-            ),
-            nn.ReLU(inplace=True),
+        self.repr_dim = self.encoder.get_output_dim(
+            pool=pool_mode,
         )
 
         self.projector = nn.Sequential(
             nn.Linear(
-                embedding_dim,
+                self.repr_dim,
                 projector_hidden_dim,
             ),
-            nn.BatchNorm1d(
-                projector_hidden_dim
-            ),
+            nn.BatchNorm1d(projector_hidden_dim),
             nn.ReLU(inplace=True),
-
             nn.Linear(
                 projector_hidden_dim,
                 proj_dim,
@@ -100,36 +68,22 @@ class SimCLRModel(nn.Module):
         )
 
     def forward(self, x):
-        temporal = (
-            self.encoder.forward_features(x)
+        h = self.encoder.encode(
+            x,
+            pool=self.pool_mode,
         )
-        # [B, 512, 10]
-
-        h = self.embedding_head(
-            temporal
-        )
-        # [B, 256]
 
         z = self.projector(h)
-        # [B, 128]
-
-        z = F.normalize(
-            z,
-            dim=1,
-        )
+        z = F.normalize(z, dim=1)
 
         return h, z
 
     def encode(self, x):
-        temporal = (
-            self.encoder.forward_features(x)
+        return self.encoder.encode(
+            x,
+            pool=self.pool_mode,
         )
 
-        h = self.embedding_head(
-            temporal
-        )
-
-        return h
 
 def random_shift(
     x: torch.Tensor,
@@ -253,7 +207,8 @@ def nt_xent_loss(
 def train_simclr(
     X_train,
     device,
-    embedding_dim: int = 256,
+    backbone_name: str = "shared_cnn_v1",
+    pool_mode: str = "mean_max",
     projector_hidden_dim: int = 320,
     proj_dim: int = 128,
     n_epochs: int = 100,
@@ -264,7 +219,8 @@ def train_simclr(
     noise_std: float = 0.05,
 ):
     model = SimCLRModel(
-        embedding_dim=embedding_dim,
+        backbone_name=backbone_name,
+        pool_mode=pool_mode,
         projector_hidden_dim=projector_hidden_dim,
         proj_dim=proj_dim,
     ).to(device)
@@ -335,7 +291,7 @@ def train_simclr(
 
             if epoch == 0 and batch_index == 0:
                 temporal_features = (
-                    model.encoder.forward_temporal(batch_x)
+                    model.encoder.forward_features(batch_x)
                 )
 
                 print(
@@ -349,10 +305,9 @@ def train_simclr(
                 )
 
                 print(
-                    "SimCLR embedding shape:",
+                    "Backbone representation shape:",
                     h1.shape,
                 )
-
                 print(
                     "Projection shape:",
                     z1.shape,
@@ -443,10 +398,14 @@ def main():
     batch_size = 64
     lr = 1e-3
 
-    backbone_name = "triplet_network_cnn"
-    embedding_dim = 256
+    backbone_name = "shared_cnn_v1"
+    pool_mode = "mean_max"
+
     projector_hidden_dim = 320
     proj_dim = 128
+
+    encoder_output_channels = 320
+    pooled_repr_dim = 640
 
     temperature = 0.2
     max_shift = 10
@@ -464,7 +423,7 @@ def main():
     run_name = (
         f"simclr_{backbone_name}"
         f"_window{window_start}-{window_end}"
-        f"_emb{embedding_dim}"
+        f"_{pool_mode}"
         f"_proj{proj_dim}"
         f"_ep{n_epochs}"
         f"_seed{seed}"
@@ -580,7 +539,8 @@ def main():
     model, loss_log = train_simclr(
         X_train=X_train,
         device=device,
-        embedding_dim=embedding_dim,
+        backbone_name=backbone_name,
+        pool_mode=pool_mode,
         projector_hidden_dim=projector_hidden_dim,
         proj_dim=proj_dim,
         n_epochs=n_epochs,
@@ -788,7 +748,7 @@ def main():
         ranks,
         save_path=rank_path,
         title=(
-            "SimCLR Triplet CNN Backbone"
+            "SimCLR Restored Shared CNN "
             "+ Linear Probe Key Rank"
         ),
     )
@@ -824,7 +784,7 @@ def main():
     append_experiment_result(
         summary_path,
         {
-            "method": "SimCLR-shared-triplet-cnn",
+            "method": "SimCLR-shared-backbone",
             "run_name": run_name,
             "dataset": "ASCAD.h5",
             "seed": seed,
@@ -838,11 +798,8 @@ def main():
             "encoder_output_channels": (
                 model.encoder.get_temporal_output_dim()
             ),
-            "embedding_dim": model.embedding_dim,
+            "pool_mode": pool_mode,
             "pooled_repr_dim": model.repr_dim,
-            "backbone_temporal_length": (
-                model.encoder.get_temporal_length()
-            ),
             "projector_hidden_dim": (
                 projector_hidden_dim
             ),

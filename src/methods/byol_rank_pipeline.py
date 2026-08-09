@@ -1,6 +1,5 @@
 from copy import deepcopy
 from pathlib import Path
-import math
 import random
 import time
 
@@ -9,7 +8,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.linear_model import LogisticRegression
-from torch.optim import Optimizer
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.datasets.ascad_loader import load_ascad_split
@@ -37,7 +35,7 @@ def set_seed(seed: int = 42) -> None:
 
 def random_shift_1d(
     x: torch.Tensor,
-    max_shift: int = 10,
+    max_shift: int = 3,
 ) -> torch.Tensor:
     if max_shift <= 0:
         return x
@@ -63,51 +61,98 @@ def random_shift_1d(
     return output
 
 
-def add_gaussian_noise(
+def random_time_mask_1d(
     x: torch.Tensor,
-    noise_std: float = 0.05,
+    mask_ratio: float = 0.0,
 ) -> torch.Tensor:
-    if noise_std <= 0:
+    if mask_ratio <= 0:
         return x
 
-    trace_std = x.std(
-        dim=1,
-        keepdim=True,
-    ).clamp_min(1e-6)
+    output = x.clone()
 
-    noise = (
-        torch.randn_like(x)
-        * trace_std
-        * noise_std
+    batch_size, trace_length, _ = output.shape
+    mask_length = max(
+        1,
+        int(round(trace_length * mask_ratio)),
     )
 
-    return x + noise
+    if mask_length >= trace_length:
+        output.zero_()
+        return output
+
+    starts = torch.randint(
+        low=0,
+        high=trace_length - mask_length + 1,
+        size=(batch_size,),
+        device=output.device,
+    )
+
+    for index, start in enumerate(starts):
+        start = int(start.item())
+
+        output[
+            index,
+            start : start + mask_length,
+            :,
+        ] = 0.0
+
+    return output
 
 
 def augment_trace(
     x: torch.Tensor,
-    max_shift: int = 10,
-    noise_std: float = 0.05,
+    max_shift: int = 3,
+    noise_std: float = 0.01,
+    scale_std: float = 0.0,
+    mask_ratio: float = 0.0,
 ) -> torch.Tensor:
-    x = random_shift_1d(
+    augmented = random_shift_1d(
         x,
         max_shift=max_shift,
     )
 
-    x = add_gaussian_noise(
-        x,
-        noise_std=noise_std,
+    if scale_std > 0:
+        scale = (
+            1.0
+            + scale_std
+            * torch.randn(
+                augmented.size(0),
+                1,
+                1,
+                device=augmented.device,
+            )
+        )
+
+        augmented = augmented * scale
+
+    if noise_std > 0:
+        trace_std = augmented.std(
+            dim=1,
+            keepdim=True,
+        ).clamp_min(1e-6)
+
+        noise = (
+            torch.randn_like(augmented)
+            * trace_std
+            * noise_std
+        )
+
+        augmented = augmented + noise
+
+    augmented = random_time_mask_1d(
+        augmented,
+        mask_ratio=mask_ratio,
     )
 
-    return x
+    return augmented
 
 
-class ReferenceMLP(nn.Module):
+class MLPHead(nn.Module):
     def __init__(
         self,
         input_dim: int,
-        hidden_dim: int = 4096,
-        output_dim: int = 256,
+        hidden_dim: int = 512,
+        output_dim: int = 128,
     ):
         super().__init__()
 
@@ -115,18 +160,12 @@ class ReferenceMLP(nn.Module):
             nn.Linear(
                 input_dim,
                 hidden_dim,
-                bias=True,
             ),
-            nn.BatchNorm1d(
-                hidden_dim,
-                eps=1e-5,
-                momentum=0.1,
-            ),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(
                 hidden_dim,
                 output_dim,
-                bias=False,
             ),
         )
 
@@ -137,42 +176,44 @@ class ReferenceMLP(nn.Module):
         return self.network(x)
 
 
-class BYOLReference1D(nn.Module):
+class BYOL1D(nn.Module):
     def __init__(
         self,
-        projector_hidden_dim: int = 4096,
-        projection_dim: int = 256,
-        predictor_hidden_dim: int = 4096,
+        backbone_name: str = "shared_cnn_v1",
+        pool_mode: str = "mean_max",
+        proj_dim: int = 128,
+        hidden_dim: int = 512,
+        ema_decay: float = 0.996,
     ):
         super().__init__()
 
+        self.backbone_name = backbone_name
+        self.pool_mode = pool_mode
+        self.proj_dim = proj_dim
+        self.hidden_dim = hidden_dim
+        self.ema_decay = ema_decay
+
         self.online_encoder = build_cnn_backbone(
+            name=backbone_name,
             input_channels=1,
-            input_length=700,
         )
 
-        self.repr_dim = (
-            self.online_encoder.get_output_channels()
+        self.pooled_repr_dim = (
+            self.online_encoder.get_output_dim(
+                pool=pool_mode,
+            )
         )
 
-        self.projector_hidden_dim = (
-            projector_hidden_dim
-        )
-        self.projection_dim = projection_dim
-        self.predictor_hidden_dim = (
-            predictor_hidden_dim
+        self.online_projector = MLPHead(
+            input_dim=self.pooled_repr_dim,
+            hidden_dim=hidden_dim,
+            output_dim=proj_dim,
         )
 
-        self.online_projector = ReferenceMLP(
-            input_dim=self.repr_dim,
-            hidden_dim=projector_hidden_dim,
-            output_dim=projection_dim,
-        )
-
-        self.online_predictor = ReferenceMLP(
-            input_dim=projection_dim,
-            hidden_dim=predictor_hidden_dim,
-            output_dim=projection_dim,
+        self.online_predictor = MLPHead(
+            input_dim=proj_dim,
+            hidden_dim=hidden_dim,
+            output_dim=proj_dim,
         )
 
         self.target_encoder = deepcopy(
@@ -183,84 +224,54 @@ class BYOLReference1D(nn.Module):
             self.online_projector
         )
 
-        for parameter in (
-            self.target_encoder.parameters()
-        ):
-            parameter.requires_grad = False
+        self._set_target_requires_grad(False)
 
-        for parameter in (
-            self.target_projector.parameters()
-        ):
-            parameter.requires_grad = False
-
-    @staticmethod
-    def _encoder_representation(
-        encoder: nn.Module,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        temporal = encoder.forward_features(x)
-
-        return temporal.mean(dim=-1)
-
-    def encode(
+    def _set_target_requires_grad(
         self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        return self._encoder_representation(
-            self.online_encoder,
-            x,
-        )
+        requires_grad: bool,
+    ) -> None:
+        for parameter in self.target_encoder.parameters():
+            parameter.requires_grad = requires_grad
 
-    def online_forward(
-        self,
-        x: torch.Tensor,
-    ):
-        representation = self.encode(x)
-
-        projection = self.online_projector(
-            representation
-        )
-
-        prediction = self.online_predictor(
-            projection
-        )
-
-        return (
-            representation,
-            projection,
-            prediction,
-        )
+        for parameter in self.target_projector.parameters():
+            parameter.requires_grad = requires_grad
 
     @torch.no_grad()
-    def target_forward(
-        self,
-        x: torch.Tensor,
-    ):
-        representation = (
-            self._encoder_representation(
-                self.target_encoder,
-                x,
+    def update_target_network(self) -> None:
+        for online_parameter, target_parameter in zip(
+            self.online_encoder.parameters(),
+            self.target_encoder.parameters(),
+        ):
+            target_parameter.data.mul_(
+                self.ema_decay
+            ).add_(
+                online_parameter.data,
+                alpha=1.0 - self.ema_decay,
             )
-        )
 
-        projection = self.target_projector(
-            representation
-        )
-
-        return representation, projection
+        for online_parameter, target_parameter in zip(
+            self.online_projector.parameters(),
+            self.target_projector.parameters(),
+        ):
+            target_parameter.data.mul_(
+                self.ema_decay
+            ).add_(
+                online_parameter.data,
+                alpha=1.0 - self.ema_decay,
+            )
 
     @staticmethod
-    def regression_loss(
+    def byol_loss(
         prediction: torch.Tensor,
-        target_projection: torch.Tensor,
+        target: torch.Tensor,
     ) -> torch.Tensor:
         prediction = F.normalize(
             prediction,
             dim=1,
         )
 
-        target_projection = F.normalize(
-            target_projection.detach(),
+        target = F.normalize(
+            target.detach(),
             dim=1,
         )
 
@@ -269,384 +280,109 @@ class BYOLReference1D(nn.Module):
             - 2.0
             * (
                 prediction
-                * target_projection
-            ).sum(dim=1)
-        ).mean()
+                * target
+            ).sum(dim=1).mean()
+        )
 
     def forward(
         self,
         x1: torch.Tensor,
         x2: torch.Tensor,
     ) -> torch.Tensor:
-        _, _, prediction1 = (
-            self.online_forward(x1)
+        online_h1 = self.online_encoder.encode(
+            x1,
+            pool=self.pool_mode,
         )
 
-        _, _, prediction2 = (
-            self.online_forward(x2)
+        online_h2 = self.online_encoder.encode(
+            x2,
+            pool=self.pool_mode,
+        )
+
+        online_z1 = self.online_projector(
+            online_h1
+        )
+
+        online_z2 = self.online_projector(
+            online_h2
+        )
+
+        prediction1 = self.online_predictor(
+            online_z1
+        )
+
+        prediction2 = self.online_predictor(
+            online_z2
         )
 
         with torch.no_grad():
-            _, target_projection1 = (
-                self.target_forward(x1)
+            target_h1 = self.target_encoder.encode(
+                x1,
+                pool=self.pool_mode,
             )
 
-            _, target_projection2 = (
-                self.target_forward(x2)
+            target_h2 = self.target_encoder.encode(
+                x2,
+                pool=self.pool_mode,
             )
 
-        loss1 = self.regression_loss(
-            prediction1,
-            target_projection2,
+            target_z1 = self.target_projector(
+                target_h1
+            )
+
+            target_z2 = self.target_projector(
+                target_h2
+            )
+
+        loss = 0.5 * (
+            self.byol_loss(
+                prediction1,
+                target_z2,
+            )
+            + self.byol_loss(
+                prediction2,
+                target_z1,
+            )
         )
-
-        loss2 = self.regression_loss(
-            prediction2,
-            target_projection1,
-        )
-
-        return loss1 + loss2
-
-    @torch.no_grad()
-    def update_target_network(
-        self,
-        tau: float,
-    ) -> None:
-        for online_parameter, target_parameter in zip(
-            self.online_encoder.parameters(),
-            self.target_encoder.parameters(),
-        ):
-            target_parameter.data.add_(
-                online_parameter.data
-                - target_parameter.data,
-                alpha=1.0 - tau,
-            )
-
-        for online_parameter, target_parameter in zip(
-            self.online_projector.parameters(),
-            self.target_projector.parameters(),
-        ):
-            target_parameter.data.add_(
-                online_parameter.data
-                - target_parameter.data,
-                alpha=1.0 - tau,
-            )
-
-
-class LARS(Optimizer):
-    def __init__(
-        self,
-        params,
-        lr: float,
-        momentum: float = 0.9,
-        weight_decay: float = 0.0,
-        eta: float = 1e-3,
-        eps: float = 1e-9,
-    ):
-        defaults = dict(
-            lr=lr,
-            momentum=momentum,
-            weight_decay=weight_decay,
-            eta=eta,
-            eps=eps,
-            lars_adaptation=True,
-        )
-
-        super().__init__(
-            params,
-            defaults,
-        )
-
-    @torch.no_grad()
-    def step(self, closure=None):
-        loss = None
-
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-
-        for group in self.param_groups:
-            lr = group["lr"]
-            momentum = group["momentum"]
-            weight_decay = group["weight_decay"]
-            eta = group["eta"]
-            eps = group["eps"]
-            use_lars = group.get(
-                "lars_adaptation",
-                True,
-            )
-
-            for parameter in group["params"]:
-                if parameter.grad is None:
-                    continue
-
-                update = parameter.grad
-
-                if weight_decay != 0:
-                    update = (
-                        update
-                        + weight_decay * parameter
-                    )
-
-                if use_lars:
-                    parameter_norm = torch.norm(
-                        parameter
-                    )
-                    update_norm = torch.norm(
-                        update
-                    )
-
-                    if (
-                        parameter_norm > 0
-                        and update_norm > 0
-                    ):
-                        trust_ratio = (
-                            eta
-                            * parameter_norm
-                            / (
-                                update_norm
-                                + eps
-                            )
-                        )
-
-                        update = (
-                            update
-                            * trust_ratio
-                        )
-
-                state = self.state[parameter]
-
-                if "momentum_buffer" not in state:
-                    state[
-                        "momentum_buffer"
-                    ] = torch.zeros_like(
-                        parameter
-                    )
-
-                buffer = state[
-                    "momentum_buffer"
-                ]
-
-                buffer.mul_(
-                    momentum
-                ).add_(
-                    update
-                )
-
-                parameter.add_(
-                    buffer,
-                    alpha=-lr,
-                )
 
         return loss
 
-
-def build_lars_parameter_groups(
-    model: nn.Module,
-    weight_decay: float,
-):
-    regular = []
-    excluded = []
-
-    for name, parameter in (
-        model.named_parameters()
-    ):
-        if not parameter.requires_grad:
-            continue
-
-        normalized_name = name.lower()
-
-        exclude = (
-            parameter.ndim == 1
-            or normalized_name.endswith(
-                ".bias"
-            )
-            or "bn" in normalized_name
-            or "norm" in normalized_name
+    def encode(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.online_encoder.encode(
+            x,
+            pool=self.pool_mode,
         )
-
-        if exclude:
-            excluded.append(parameter)
-        else:
-            regular.append(parameter)
-
-    return [
-        {
-            "params": regular,
-            "weight_decay": weight_decay,
-            "lars_adaptation": True,
-        },
-        {
-            "params": excluded,
-            "weight_decay": 0.0,
-            "lars_adaptation": False,
-        },
-    ]
-
-
-def reference_lr(
-    step: int,
-    total_steps: int,
-    warmup_steps: int,
-    base_learning_rate: float,
-    batch_size: int,
-) -> float:
-    scaled_lr = (
-        base_learning_rate
-        * batch_size
-        / 256.0
-    )
-
-    if (
-        warmup_steps > 0
-        and step < warmup_steps
-    ):
-        return (
-            step
-            / warmup_steps
-            * scaled_lr
-        )
-
-    decay_steps = max(
-        1,
-        total_steps - warmup_steps,
-    )
-
-    progress = (
-        step - warmup_steps
-    ) / decay_steps
-
-    progress = min(
-        max(progress, 0.0),
-        1.0,
-    )
-
-    return (
-        0.5
-        * scaled_lr
-        * (
-            1.0
-            + math.cos(
-                math.pi * progress
-            )
-        )
-    )
-
-
-def reference_target_ema(
-    step: int,
-    total_steps: int,
-    base_ema: float,
-) -> float:
-    progress = min(
-        max(
-            step / max(
-                total_steps,
-                1,
-            ),
-            0.0,
-        ),
-        1.0,
-    )
-
-    cosine_decay = (
-        0.5
-        * (
-            1.0
-            + math.cos(
-                math.pi * progress
-            )
-        )
-    )
-
-    return (
-        1.0
-        - (
-            1.0 - base_ema
-        )
-        * cosine_decay
-    )
-
-
-def reference_preset(
-    n_epochs: int,
-):
-    presets = {
-        40: {
-            "base_learning_rate": 0.45,
-            "weight_decay": 1e-6,
-            "base_target_ema": 0.97,
-        },
-        100: {
-            "base_learning_rate": 0.45,
-            "weight_decay": 1e-6,
-            "base_target_ema": 0.99,
-        },
-        300: {
-            "base_learning_rate": 0.30,
-            "weight_decay": 1e-6,
-            "base_target_ema": 0.99,
-        },
-        1000: {
-            "base_learning_rate": 0.20,
-            "weight_decay": 1.5e-6,
-            "base_target_ema": 0.996,
-        },
-    }
-
-    if n_epochs not in presets:
-        raise ValueError(
-            "Reference BYOL presets support "
-            "40, 100, 300, or 1000 epochs."
-        )
-
-    return presets[n_epochs]
 
 
 def train_byol(
     X_train,
     device,
+    backbone_name: str = "shared_cnn_v1",
+    pool_mode: str = "mean_max",
+    proj_dim: int = 128,
+    hidden_dim: int = 512,
+    ema_decay: float = 0.996,
     n_epochs: int = 100,
     batch_size: int = 128,
-    projector_hidden_dim: int = 4096,
-    projection_dim: int = 256,
-    predictor_hidden_dim: int = 4096,
-    warmup_epochs: int = 10,
-    lars_momentum: float = 0.9,
-    lars_eta: float = 1e-3,
-    max_shift: int = 10,
-    noise_std: float = 0.05,
+    lr: float = 3e-4,
+    max_shift: int = 3,
+    noise_std: float = 0.01,
+    scale_std: float = 0.0,
+    mask_ratio: float = 0.0,
 ):
-    preset = reference_preset(
-        n_epochs
-    )
-
-    base_learning_rate = preset[
-        "base_learning_rate"
-    ]
-
-    weight_decay = preset[
-        "weight_decay"
-    ]
-
-    base_target_ema = preset[
-        "base_target_ema"
-    ]
-
-    model = BYOLReference1D(
-        projector_hidden_dim=(
-            projector_hidden_dim
-        ),
-        projection_dim=projection_dim,
-        predictor_hidden_dim=(
-            predictor_hidden_dim
-        ),
+    model = BYOL1D(
+        backbone_name=backbone_name,
+        pool_mode=pool_mode,
+        proj_dim=proj_dim,
+        hidden_dim=hidden_dim,
+        ema_decay=ema_decay,
     ).to(device)
 
     dataset = TensorDataset(
-        torch.from_numpy(
-            X_train
-        ).float()
+        torch.from_numpy(X_train).float()
     )
 
     loader = DataLoader(
@@ -656,34 +392,13 @@ def train_byol(
         drop_last=True,
     )
 
-    parameter_groups = (
-        build_lars_parameter_groups(
-            model,
-            weight_decay=weight_decay,
-        )
-    )
-
-    optimizer = LARS(
-        parameter_groups,
-        lr=0.0,
-        momentum=lars_momentum,
-        eta=lars_eta,
-    )
-
-    total_steps = (
-        len(loader) * n_epochs
-    )
-
-    warmup_steps = (
-        len(loader)
-        * warmup_epochs
-    )
-
-    trainable_params = sum(
-        parameter.numel()
-        for parameter
-        in model.parameters()
-        if parameter.requires_grad
+    optimizer = torch.optim.Adam(
+        [
+            parameter
+            for parameter in model.parameters()
+            if parameter.requires_grad
+        ],
+        lr=lr,
     )
 
     backbone_params = sum(
@@ -693,120 +408,102 @@ def train_byol(
         if parameter.requires_grad
     )
 
+    full_model_params = sum(
+        parameter.numel()
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    )
+
     print(
-        "Backbone trainable parameters:",
+        "Shared backbone trainable parameters:",
         backbone_params,
     )
 
     print(
-        "Full online trainable parameters:",
-        trainable_params,
+        "Full BYOL trainable parameters:",
+        full_model_params,
     )
 
     model.eval()
 
     with torch.no_grad():
-        sample = torch.from_numpy(
+        sample_x = torch.from_numpy(
             X_train[:8]
         ).float().to(device)
 
-        temporal = (
+        temporal_features = (
             model.online_encoder.forward_features(
-                sample
+                sample_x
             )
         )
 
-        representation = model.encode(
-            sample
+        pooled_features = model.encode(
+            sample_x
         )
 
-        projection = (
+        projected_features = (
             model.online_projector(
-                representation
+                pooled_features
             )
         )
 
-        prediction = (
+        predicted_features = (
             model.online_predictor(
-                projection
+                projected_features
             )
         )
 
     print(
         "Sample input shape:",
-        sample.shape,
+        sample_x.shape,
     )
 
     print(
         "Temporal feature shape:",
-        temporal.shape,
+        temporal_features.shape,
     )
 
     print(
-        "Encoder representation shape:",
-        representation.shape,
+        "Pooled representation shape:",
+        pooled_features.shape,
     )
 
     print(
         "Projection shape:",
-        projection.shape,
+        projected_features.shape,
     )
 
     print(
         "Prediction shape:",
-        prediction.shape,
+        predicted_features.shape,
     )
 
     model.train()
 
     loss_log = []
-    global_step = 0
 
     for epoch in range(n_epochs):
         total_loss = 0.0
         num_batches = 0
 
         for (batch_x,) in loader:
-            batch_x = batch_x.to(
-                device
-            )
+            batch_x = batch_x.to(device)
 
             x1 = augment_trace(
                 batch_x,
                 max_shift=max_shift,
                 noise_std=noise_std,
+                scale_std=scale_std,
+                mask_ratio=mask_ratio,
             )
 
             x2 = augment_trace(
                 batch_x,
                 max_shift=max_shift,
                 noise_std=noise_std,
+                scale_std=scale_std,
+                mask_ratio=mask_ratio,
             )
-
-            learning_rate = (
-                reference_lr(
-                    step=global_step,
-                    total_steps=total_steps,
-                    warmup_steps=warmup_steps,
-                    base_learning_rate=(
-                        base_learning_rate
-                    ),
-                    batch_size=batch_size,
-                )
-            )
-
-            tau = reference_target_ema(
-                step=global_step,
-                total_steps=total_steps,
-                base_ema=base_target_ema,
-            )
-
-            for group in (
-                optimizer.param_groups
-            ):
-                group["lr"] = (
-                    learning_rate
-                )
 
             loss = model(
                 x1,
@@ -819,22 +516,25 @@ def train_byol(
 
             loss.backward()
 
+            torch.nn.utils.clip_grad_norm_(
+                [
+                    parameter
+                    for parameter in model.parameters()
+                    if parameter.requires_grad
+                ],
+                max_norm=1.0,
+            )
+
             optimizer.step()
 
-            model.update_target_network(
-                tau=tau,
-            )
+            model.update_target_network()
 
             total_loss += loss.item()
             num_batches += 1
-            global_step += 1
 
         average_loss = (
             total_loss
-            / max(
-                num_batches,
-                1,
-            )
+            / max(num_batches, 1)
         )
 
         loss_log.append(
@@ -843,25 +543,10 @@ def train_byol(
 
         print(
             f"Epoch #{epoch}: "
-            f"byol_loss={average_loss:.6f}, "
-            f"lr={learning_rate:.6f}, "
-            f"ema={tau:.6f}"
+            f"byol_loss={average_loss:.6f}"
         )
 
-    config = {
-        "base_learning_rate": (
-            base_learning_rate
-        ),
-        "weight_decay": weight_decay,
-        "base_target_ema": (
-            base_target_ema
-        ),
-        "warmup_epochs": warmup_epochs,
-        "lars_momentum": lars_momentum,
-        "lars_eta": lars_eta,
-    }
-
-    return model, loss_log, config
+    return model, loss_log
 
 
 def encode_representations(
@@ -871,9 +556,7 @@ def encode_representations(
     batch_size: int = 256,
 ):
     dataset = TensorDataset(
-        torch.from_numpy(
-            X
-        ).float()
+        torch.from_numpy(X).float()
     )
 
     loader = DataLoader(
@@ -888,14 +571,10 @@ def encode_representations(
 
     with torch.no_grad():
         for (batch_x,) in loader:
-            batch_x = batch_x.to(
-                device
-            )
+            batch_x = batch_x.to(device)
 
-            representation = (
-                model.encode(
-                    batch_x
-                )
+            representation = model.encode(
+                batch_x
             )
 
             representations.append(
@@ -924,17 +603,19 @@ def main():
 
     n_epochs = 100
     batch_size = 128
+    lr = 3e-4
 
-    projector_hidden_dim = 4096
-    projection_dim = 256
-    predictor_hidden_dim = 4096
+    backbone_name = "shared_cnn_v1"
+    pool_mode = "mean_max"
 
-    warmup_epochs = 10
-    lars_momentum = 0.9
-    lars_eta = 1e-3
+    proj_dim = 128
+    hidden_dim = 512
+    ema_decay = 0.996
 
-    max_shift = 10
-    noise_std = 0.05
+    max_shift = 3
+    noise_std = 0.01
+    scale_std = 0.0
+    mask_ratio = 0.0
 
     target_byte = 2
     normalize_mode = None
@@ -952,18 +633,16 @@ def main():
 
     set_seed(seed)
 
-    backbone_name = (
-        "triplet_network_conv_cnn"
-    )
-
     run_name = (
-        f"byol_ref_{backbone_name}"
+        f"byol_{backbone_name}"
         f"_window{window_start}-{window_end}"
-        f"_gap"
-        f"_proj{projection_dim}"
-        f"_ph{projector_hidden_dim}"
+        f"_{pool_mode}"
+        f"_weakaug"
+        f"_shift{max_shift}"
+        f"_noise{str(noise_std).replace('.', 'p')}"
+        f"_ema{str(ema_decay).replace('.', 'p')}"
+        f"_proj{proj_dim}"
         f"_ep{n_epochs}"
-        f"_bs{batch_size}"
         f"_seed{seed}"
     )
 
@@ -1007,15 +686,13 @@ def main():
         "Loading ASCAD profiling traces..."
     )
 
-    X_profiling, y_profiling = (
-        load_ascad_split(
-            h5_path=ascad_path,
-            split="profiling",
-            add_channel=True,
-            normalize=normalize_mode,
-            load_metadata=False,
-            trace_window=trace_window,
-        )
+    X_profiling, y_profiling = load_ascad_split(
+        h5_path=ascad_path,
+        split="profiling",
+        add_channel=True,
+        normalize=normalize_mode,
+        load_metadata=False,
+        trace_window=trace_window,
     )
 
     print(
@@ -1036,22 +713,25 @@ def main():
         trace_window=trace_window,
     )
 
-    X_train = X_profiling[
-        :n_train
-    ]
+    X_train = X_profiling[:n_train]
+    y_train = y_profiling[:n_train]
 
-    y_train = y_profiling[
-        :n_train
-    ]
-
-    X_attack_small = X_attack[
-        :n_attack
-    ]
+    X_attack_small = (
+        X_attack[:n_attack]
+    )
 
     metadata_attack_small = (
-        metadata_attack[
-            :n_attack
-        ]
+        metadata_attack[:n_attack]
+    )
+
+    print(
+        "Trace window:",
+        trace_window,
+    )
+
+    print(
+        "Window size:",
+        window_size,
     )
 
     print(
@@ -1060,8 +740,18 @@ def main():
     )
 
     print(
+        "y_train shape:",
+        y_train.shape,
+    )
+
+    print(
         "X_attack shape:",
         X_attack_small.shape,
+    )
+
+    print(
+        "metadata_attack shape:",
+        metadata_attack_small.shape,
     )
 
     device = get_device(
@@ -1074,32 +764,26 @@ def main():
     )
 
     print(
-        "Training reference-style BYOL..."
+        "Training BYOL-1D..."
     )
 
     train_start_time = time.time()
 
-    (
-        model,
-        loss_log,
-        ref_config,
-    ) = train_byol(
+    model, loss_log = train_byol(
         X_train=X_train,
         device=device,
+        backbone_name=backbone_name,
+        pool_mode=pool_mode,
+        proj_dim=proj_dim,
+        hidden_dim=hidden_dim,
+        ema_decay=ema_decay,
         n_epochs=n_epochs,
         batch_size=batch_size,
-        projector_hidden_dim=(
-            projector_hidden_dim
-        ),
-        projection_dim=projection_dim,
-        predictor_hidden_dim=(
-            predictor_hidden_dim
-        ),
-        warmup_epochs=warmup_epochs,
-        lars_momentum=lars_momentum,
-        lars_eta=lars_eta,
+        lr=lr,
         max_shift=max_shift,
         noise_std=noise_std,
+        scale_std=scale_std,
+        mask_ratio=mask_ratio,
     )
 
     train_end_time = time.time()
@@ -1109,9 +793,34 @@ def main():
         - train_start_time
     )
 
+    train_time_ms = (
+        train_time_sec
+        * 1000
+    )
+
     print(
-        "Training time:",
-        f"{train_time_sec:.2f} sec",
+        "BYOL loss log:",
+        loss_log,
+    )
+
+    print(
+        f"Training start time: "
+        f"{train_start_time}"
+    )
+
+    print(
+        f"Training end time: "
+        f"{train_end_time}"
+    )
+
+    print(
+        f"Training time: "
+        f"{train_time_sec:.2f} sec"
+    )
+
+    print(
+        f"Training time: "
+        f"{train_time_ms:.2f} ms"
     )
 
     checkpoint_path = (
@@ -1161,15 +870,15 @@ def main():
         repr_attack.shape,
     )
 
-    if (
-        repr_train.shape[1]
-        != model.repr_dim
-    ):
+    expected_repr_dim = (
+        model.pooled_repr_dim
+    )
+
+    if repr_train.shape[1] != expected_repr_dim:
         raise ValueError(
-            "Unexpected representation "
-            f"dimension: expected "
-            f"{model.repr_dim}, received "
-            f"{repr_train.shape[1]}"
+            "Unexpected representation dimension: "
+            f"expected {expected_repr_dim}, "
+            f"received {repr_train.shape[1]}"
         )
 
     np.save(
@@ -1187,52 +896,13 @@ def main():
         y_train,
     )
 
-    feature_std = repr_train.std(
-        axis=0
-    )
-
-    print(
-        "Representation overall std:",
-        float(
-            repr_train.std()
-        ),
-    )
-
-    print(
-        "Representation median feature std:",
-        float(
-            np.median(
-                feature_std
-            )
-        ),
-    )
-
-    print(
-        "Representation dead feature ratio:",
-        float(
-            np.mean(
-                feature_std < 1e-6
-            )
-        ),
-    )
-
-    print(
-        "Representation mean L2 norm:",
-        float(
-            np.linalg.norm(
-                repr_train,
-                axis=1,
-            ).mean()
-        ),
-    )
-
     print(
         "Training linear classifier "
-        "on BYOL encoder representations..."
+        "on BYOL representations..."
     )
 
     classifier = LogisticRegression(
-        max_iter=5000,
+        max_iter=2000,
         solver="lbfgs",
     )
 
@@ -1268,6 +938,15 @@ def main():
         classes=classifier.classes_,
     )
 
+    print(
+        "attack_probas shape:",
+        attack_probas.shape,
+    )
+
+    print(
+        "Computing key rank curve..."
+    )
+
     ranks = compute_rank_curve(
         probas=attack_probas,
         metadata=metadata_attack_small,
@@ -1289,13 +968,8 @@ def main():
     )[0]
 
     rank0_trace = (
-        int(
-            rank0_indices[0]
-            + 1
-        )
-        if len(
-            rank0_indices
-        ) > 0
+        int(rank0_indices[0] + 1)
+        if len(rank0_indices) > 0
         else -1
     )
 
@@ -1316,33 +990,36 @@ def main():
 
     rank_path = (
         figure_dir
-        / (
-            f"{run_name}"
-            "_linear_probe_rank.png"
-        )
+        / f"{run_name}_linear_probe_rank.png"
     )
 
     ranks_path = (
         repr_dir
-        / (
-            f"{run_name}"
-            "_linear_probe_ranks.npy"
-        )
+        / f"{run_name}_linear_probe_ranks.npy"
     )
 
     plot_rank_curve(
         ranks,
         save_path=rank_path,
         title=(
-            "Reference-Style BYOL "
-            "Shared Triplet CNN "
-            "Linear Probe Key Rank"
+            "BYOL Restored Shared CNN "
+            "+ Linear Probe Key Rank"
         ),
     )
 
     np.save(
         ranks_path,
         ranks,
+    )
+
+    print(
+        "Saved rank curve to:",
+        rank_path,
+    )
+
+    print(
+        "Saved ranks to:",
+        ranks_path,
     )
 
     summary_path = (
@@ -1359,20 +1036,10 @@ def main():
         if parameter.requires_grad
     )
 
-    peak_lr = (
-        ref_config[
-            "base_learning_rate"
-        ]
-        * batch_size
-        / 256.0
-    )
-
     append_experiment_result(
         summary_path,
         {
-            "method": (
-                "BYOL-reference-style"
-            ),
+            "method": "BYOL-restored-shared-backbone",
             "run_name": run_name,
             "dataset": "ASCAD.h5",
             "seed": seed,
@@ -1380,111 +1047,53 @@ def main():
             "n_attack": n_attack,
             "n_epochs": n_epochs,
             "batch_size": batch_size,
-            "backbone_name": (
-                backbone_name
-            ),
-            "backbone_params": (
-                backbone_params
-            ),
+            "lr": lr,
+            "backbone_name": backbone_name,
+            "backbone_params": backbone_params,
             "encoder_output_channels": (
-                model.online_encoder
-                .get_output_channels()
+                model.online_encoder.output_channels
             ),
-            "pool_mode": "global_avg",
+            "pool_mode": pool_mode,
             "pooled_repr_dim": (
-                model.repr_dim
+                model.pooled_repr_dim
             ),
-            "projector_hidden_dim": (
-                projector_hidden_dim
-            ),
-            "proj_dim": projection_dim,
-            "predictor_hidden_dim": (
-                predictor_hidden_dim
-            ),
-            "optimizer": "LARS",
-            "base_learning_rate": (
-                ref_config[
-                    "base_learning_rate"
-                ]
-            ),
-            "peak_learning_rate": (
-                peak_lr
-            ),
-            "weight_decay": (
-                ref_config[
-                    "weight_decay"
-                ]
-            ),
-            "warmup_epochs": (
-                warmup_epochs
-            ),
-            "lr_schedule": (
-                "warmup_cosine"
-            ),
-            "base_target_ema": (
-                ref_config[
-                    "base_target_ema"
-                ]
-            ),
-            "ema_schedule": (
-                "cosine_to_1"
-            ),
-            "lars_momentum": (
-                lars_momentum
-            ),
-            "lars_eta": (
-                lars_eta
-            ),
+            "proj_dim": proj_dim,
+            "hidden_dim": hidden_dim,
+            "ema_decay": ema_decay,
             "max_shift": max_shift,
             "noise_std": noise_std,
-            "normalize": (
-                normalize_mode
-            ),
-            "window_start": (
-                window_start
-            ),
-            "window_end": (
-                window_end
-            ),
-            "window_size": (
-                window_size
-            ),
+            "scale_std": scale_std,
+            "mask_ratio": mask_ratio,
+            "normalize": normalize_mode,
+            "window_start": window_start,
+            "window_end": window_end,
+            "window_size": window_size,
             "classifier": (
                 "LogisticRegression"
             ),
-            "linear_probe_train_acc": (
-                round(
-                    train_acc,
-                    6,
-                )
+            "linear_probe_train_acc": round(
+                train_acc,
+                6,
             ),
-            "target_byte": (
-                target_byte
-            ),
-            "device": str(
-                device
-            ),
+            "target_byte": target_byte,
+            "device": str(device),
             "train_start_time": (
                 train_start_time
             ),
             "train_end_time": (
                 train_end_time
             ),
-            "train_time_sec": (
-                round(
-                    train_time_sec,
-                    2,
-                )
+            "train_time_sec": round(
+                train_time_sec,
+                2,
             ),
-            "final_rank": (
-                final_rank
+            "train_time_ms": round(
+                train_time_ms,
+                2,
             ),
-            "min_rank": (
-                min_rank
-            ),
-            "rank0_trace": (
-                rank0_trace
-            ),
+            "final_rank": final_rank,
+            "min_rank": min_rank,
+            "rank0_trace": rank0_trace,
             "figure_path": str(
                 rank_path.relative_to(
                     PROJECT_ROOT
