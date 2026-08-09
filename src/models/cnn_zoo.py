@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 
-
 class SharedTripletCNNBackbone(nn.Module):
+
     def __init__(
         self,
         input_channels: int = 1,
@@ -12,8 +12,7 @@ class SharedTripletCNNBackbone(nn.Module):
 
         self.input_channels = input_channels
         self.input_length = input_length
-        self.output_dim = 4096
-        self.temporal_output_dim = 512
+        self.output_channels = 512
 
         self.features = nn.Sequential(
             nn.Conv1d(
@@ -88,26 +87,8 @@ class SharedTripletCNNBackbone(nn.Module):
                 input_channels,
                 input_length,
             )
-
-            temporal = self.features(dummy)
-
-            self.temporal_length = temporal.shape[-1]
-            self.flatten_dim = temporal.flatten(
-                start_dim=1
-            ).shape[1]
-
-        self.feature_head = nn.Sequential(
-            nn.Linear(
-                self.flatten_dim,
-                4096,
-            ),
-            nn.ReLU(inplace=True),
-            nn.Linear(
-                4096,
-                4096,
-            ),
-            nn.ReLU(inplace=True),
-        )
+            out = self.features(dummy)
+            self.temporal_length = out.shape[-1]
 
     def _to_channels_first(
         self,
@@ -148,24 +129,69 @@ class SharedTripletCNNBackbone(nn.Module):
         self,
         x: torch.Tensor,
     ) -> torch.Tensor:
-        h = self.forward_features(x)
-        h = torch.flatten(
-            h,
-            start_dim=1,
-        )
-        return self.feature_head(h)
+        return self.forward_temporal(x)
 
-    def encode(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        return self.forward(x)
-
-    def get_output_dim(self) -> int:
-        return self.output_dim
+    def get_output_channels(self) -> int:
+        return self.output_channels
 
     def get_temporal_output_dim(self) -> int:
-        return self.temporal_output_dim
+        return self.output_channels
+
+    def get_temporal_length(self) -> int:
+        return self.temporal_length
+
+    def get_readout_dim(
+        self,
+        mode: str = "mean_max",
+    ) -> int:
+        if mode == "mean":
+            return self.output_channels
+
+        if mode == "max":
+            return self.output_channels
+
+        if mode == "mean_max":
+            return self.output_channels * 2
+
+        raise ValueError(
+            f"Unsupported readout mode: {mode}"
+        )
+
+
+def pool_temporal(
+    temporal: torch.Tensor,
+    mode: str = "mean_max",
+) -> torch.Tensor:
+    """
+    Parameter-free readout used for a common downstream representation.
+
+    temporal shape:
+        [B, T, C]
+    """
+
+    if temporal.ndim != 3:
+        raise ValueError(
+            f"Expected [B, T, C], got {tuple(temporal.shape)}"
+        )
+
+    if mode == "mean":
+        return temporal.mean(dim=1)
+
+    if mode == "max":
+        return temporal.max(dim=1).values
+
+    if mode == "mean_max":
+        mean_features = temporal.mean(dim=1)
+        max_features = temporal.max(dim=1).values
+
+        return torch.cat(
+            [mean_features, max_features],
+            dim=1,
+        )
+
+    raise ValueError(
+        f"Unsupported readout mode: {mode}"
+    )
 
 
 def build_cnn_backbone(

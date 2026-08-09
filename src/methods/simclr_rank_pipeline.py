@@ -15,7 +15,7 @@ from src.evaluation.rank_eval import (
     expand_proba_to_256,
     plot_rank_curve,
 )
-from src.models.cnn_zoo import build_cnn_backbone
+from src.models.cnn_zoo import build_cnn_backbone, pool_temporal
 from src.utils.experiment_logger import append_experiment_result
 from src.utils.get_device import get_device
 
@@ -45,7 +45,11 @@ class SimCLRModel(nn.Module):
             input_length=700,
         )
 
-        self.repr_dim = self.encoder.get_output_dim()
+        self.readout_mode = "mean_max"
+
+        self.repr_dim = self.encoder.get_readout_dim(
+            mode=self.readout_mode,
+        )
 
         self.projector = nn.Sequential(
             nn.Linear(
@@ -61,7 +65,12 @@ class SimCLRModel(nn.Module):
         )
 
     def forward(self, x):
-        h = self.encoder.encode(x)
+        temporal = self.encoder.forward_temporal(x)
+
+        h = pool_temporal(
+            temporal,
+            mode=self.readout_mode,
+        )
 
         z = self.projector(h)
         z = F.normalize(z, dim=1)
@@ -69,7 +78,12 @@ class SimCLRModel(nn.Module):
         return h, z
 
     def encode(self, x):
-        return self.encoder.encode(x)
+        temporal = self.encoder.forward_temporal(x)
+
+        return pool_temporal(
+            temporal,
+            mode=self.readout_mode,
+        )
 
 
 def random_shift(
@@ -288,7 +302,7 @@ def train_simclr(
                 )
 
                 print(
-                    "Backbone representation shape:",
+                    "Common readout representation shape:",
                     h1.shape,
                 )
                 print(
@@ -401,6 +415,7 @@ def main():
     run_name = (
         f"simclr_{backbone_name}"
         f"_window{window_start}-{window_end}"
+        f"_readout_meanmax"
         f"_proj{proj_dim}"
         f"_ep{n_epochs}"
         f"_seed{seed}"
@@ -773,8 +788,11 @@ def main():
             "encoder_output_channels": (
                 model.encoder.get_temporal_output_dim()
             ),
-            "pool_mode": "identity",
+            "pool_mode": "mean_max",
             "pooled_repr_dim": model.repr_dim,
+            "backbone_temporal_length": (
+                model.encoder.get_temporal_length()
+            ),
             "projector_hidden_dim": (
                 projector_hidden_dim
             ),

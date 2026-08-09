@@ -17,7 +17,7 @@ from src.evaluation.rank_eval import (
     expand_proba_to_256,
     plot_rank_curve,
 )
-from src.models.cnn_zoo import build_cnn_backbone
+from src.models.cnn_zoo import build_cnn_backbone, pool_temporal
 from src.utils.experiment_logger import append_experiment_result
 from src.utils.get_device import get_device
 
@@ -195,7 +195,13 @@ class BYOL1D(nn.Module):
             input_length=700,
         )
 
-        self.repr_dim = self.online_encoder.get_output_dim()
+        self.readout_mode = "mean_max"
+
+        self.repr_dim = (
+            self.online_encoder.get_readout_dim(
+                mode=self.readout_mode,
+            )
+        )
 
         self.pooled_repr_dim = self.repr_dim
 
@@ -220,6 +226,18 @@ class BYOL1D(nn.Module):
         )
 
         self._set_target_requires_grad(False)
+
+    def _encode_with(
+        self,
+        encoder,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        temporal = encoder.forward_temporal(x)
+
+        return pool_temporal(
+            temporal,
+            mode=self.readout_mode,
+        )
 
     def _set_target_requires_grad(
         self,
@@ -293,9 +311,9 @@ class BYOL1D(nn.Module):
         x1: torch.Tensor,
         x2: torch.Tensor,
     ) -> torch.Tensor:
-        online_h1 = self.online_encoder.encode(x1)
+        online_h1 = self._encode_with(self.online_encoder, x1)
 
-        online_h2 = self.online_encoder.encode(x2)
+        online_h2 = self._encode_with(self.online_encoder, x2)
 
         online_z1 = self.online_projector(
             online_h1
@@ -314,9 +332,9 @@ class BYOL1D(nn.Module):
         )
 
         with torch.no_grad():
-            target_h1 = self.target_encoder.encode(x1)
+            target_h1 = self._encode_with(self.target_encoder, x1)
 
-            target_h2 = self.target_encoder.encode(x2)
+            target_h2 = self._encode_with(self.target_encoder, x2)
 
             target_z1 = self.target_projector(
                 target_h1
@@ -343,7 +361,10 @@ class BYOL1D(nn.Module):
         self,
         x: torch.Tensor,
     ) -> torch.Tensor:
-        return self.online_encoder.encode(x)
+        return self._encode_with(
+            self.online_encoder,
+            x,
+        )
 
 
 
@@ -556,7 +577,7 @@ def train_byol(
     )
 
     print(
-        "Backbone representation shape:",
+        "Common readout representation shape:",
         pooled_features.shape,
     )
 
@@ -734,6 +755,7 @@ def main():
     run_name = (
         f"byol_{backbone_name}"
         f"_window{window_start}-{window_end}"
+        f"_readout_meanmax"
         f"_scheduled"
         f"_weakaug"
         f"_shift{max_shift}"
@@ -1100,7 +1122,7 @@ def main():
         ranks,
         save_path=rank_path,
         title=(
-            "BYOL Shared Triplet CNN "
+            "BYOL Shared Triplet CNN Conv Backbone "
             "+ Linear Probe Key Rank"
         ),
     )
@@ -1156,9 +1178,12 @@ def main():
             "encoder_output_channels": (
                 model.online_encoder.get_temporal_output_dim()
             ),
-            "pool_mode": "identity",
+            "pool_mode": "mean_max",
             "pooled_repr_dim": (
                 model.pooled_repr_dim
+            ),
+            "backbone_temporal_length": (
+                model.online_encoder.get_temporal_length()
             ),
             "proj_dim": proj_dim,
             "hidden_dim": hidden_dim,
