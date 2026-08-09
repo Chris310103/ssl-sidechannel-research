@@ -35,10 +35,10 @@ def set_seed(seed: int = 42) -> None:
 class SimCLRModel(nn.Module):
     def __init__(
         self,
-        backbone_name: str = "shared_cnn_v1",
-        pool_mode: str = "mean_max",
-        projector_hidden_dim: int = 320,
-        proj_dim: int = 128,
+        backbone_name,
+        pool_mode,
+        projector_hidden_dim,
+        proj_dim,
     ):
         super().__init__()
 
@@ -207,16 +207,16 @@ def nt_xent_loss(
 def train_simclr(
     X_train,
     device,
-    backbone_name: str = "shared_cnn_v1",
-    pool_mode: str = "mean_max",
-    projector_hidden_dim: int = 320,
-    proj_dim: int = 128,
-    n_epochs: int = 100,
-    batch_size: int = 64,
-    lr: float = 1e-3,
-    temperature: float = 0.2,
-    max_shift: int = 10,
-    noise_std: float = 0.05,
+    backbone_name,
+    pool_mode,
+    projector_hidden_dim,
+    proj_dim,
+    n_epochs,
+    batch_size,
+    lr,
+    temperature,
+    max_shift,
+    noise_std,
 ):
     model = SimCLRModel(
         backbone_name=backbone_name,
@@ -305,10 +305,9 @@ def train_simclr(
                 )
 
                 print(
-                    "Pooled representation shape:",
+                    "Backbone representation shape:",
                     h1.shape,
                 )
-
                 print(
                     "Projection shape:",
                     z1.shape,
@@ -399,14 +398,13 @@ def main():
     batch_size = 64
     lr = 1e-3
 
-    backbone_name = "shared_cnn_v1"
-    pool_mode = "mean_max"
-
-    encoder_output_channels = 320
-    pooled_repr_dim = 640
+    backbone_name = "triplet_cnn_v1"
+    pool_mode = "identity"
 
     projector_hidden_dim = 320
     proj_dim = 128
+
+    encoder_output_channels = 512
 
     temperature = 0.2
     max_shift = 10
@@ -635,10 +633,12 @@ def main():
         repr_attack.shape,
     )
 
-    if repr_train.shape[1] != pooled_repr_dim:
+    expected_repr_dim = model.repr_dim
+
+    if repr_train.shape[1] != expected_repr_dim:
         raise ValueError(
-            "Unexpected pooled representation dimension: "
-            f"expected {pooled_repr_dim}, "
+            "Unexpected representation dimension: "
+            f"expected {expected_repr_dim}, "
             f"received {repr_train.shape[1]}"
         )
 
@@ -747,7 +747,7 @@ def main():
         ranks,
         save_path=rank_path,
         title=(
-            "SimCLR Shared CNN "
+            "SimCLR Triplet CNN Backbone "
             "+ Linear Probe Key Rank"
         ),
     )
@@ -783,7 +783,7 @@ def main():
     append_experiment_result(
         summary_path,
         {
-            "method": "SimCLR-shared-backbone",
+            "method": "SimCLR-triplet-backbone",
             "run_name": run_name,
             "dataset": "ASCAD.h5",
             "seed": seed,
@@ -798,9 +798,7 @@ def main():
                 encoder_output_channels
             ),
             "pool_mode": pool_mode,
-            "pooled_repr_dim": (
-                pooled_repr_dim
-            ),
+            "pooled_repr_dim": model.repr_dim,
             "projector_hidden_dim": (
                 projector_hidden_dim
             ),

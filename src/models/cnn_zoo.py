@@ -6,6 +6,205 @@ import torch.nn as nn
 
 PoolMode = Literal["none", "mean", "max", "mean_max", "last"]
 
+import torch
+import torch.nn as nn
+
+
+class TripletCNNBackbone(nn.Module):
+    def __init__(
+        self,
+        input_channels=1,
+        input_length=700,
+        embedding_dim=256,
+    ):
+        super().__init__()
+
+        self.input_channels = input_channels
+        self.input_length = input_length
+        self.embedding_dim = embedding_dim
+
+        self.features = nn.Sequential(
+            nn.Conv1d(
+                input_channels,
+                64,
+                kernel_size=11,
+                stride=2,
+                padding=5,
+            ),
+            nn.ReLU(inplace=True),
+            nn.AvgPool1d(
+                kernel_size=2,
+                stride=2,
+            ),
+
+            nn.Conv1d(
+                64,
+                128,
+                kernel_size=11,
+                stride=1,
+                padding=5,
+            ),
+            nn.ReLU(inplace=True),
+            nn.AvgPool1d(
+                kernel_size=2,
+                stride=2,
+            ),
+
+            nn.Conv1d(
+                128,
+                256,
+                kernel_size=11,
+                stride=1,
+                padding=5,
+            ),
+            nn.ReLU(inplace=True),
+            nn.AvgPool1d(
+                kernel_size=2,
+                stride=2,
+            ),
+
+            nn.Conv1d(
+                256,
+                512,
+                kernel_size=11,
+                stride=1,
+                padding=5,
+            ),
+            nn.ReLU(inplace=True),
+            nn.AvgPool1d(
+                kernel_size=2,
+                stride=2,
+            ),
+
+            nn.Conv1d(
+                512,
+                512,
+                kernel_size=11,
+                stride=1,
+                padding=5,
+            ),
+            nn.ReLU(inplace=True),
+            nn.AvgPool1d(
+                kernel_size=2,
+                stride=2,
+            ),
+        )
+
+        with torch.no_grad():
+            dummy = torch.zeros(
+                1,
+                input_channels,
+                input_length,
+            )
+
+            dummy_features = self.features(dummy)
+
+            self.temporal_length = dummy_features.shape[-1]
+
+            flatten_dim = dummy_features.flatten(
+                start_dim=1
+            ).shape[1]
+
+        self.flatten_dim = flatten_dim
+
+        self.embedding_head = nn.Sequential(
+            nn.Linear(
+                flatten_dim,
+                4096,
+            ),
+            nn.ReLU(inplace=True),
+
+            nn.Linear(
+                4096,
+                4096,
+            ),
+            nn.ReLU(inplace=True),
+
+            nn.Linear(
+                4096,
+                embedding_dim,
+            ),
+            nn.ReLU(inplace=True),
+        )
+
+    def _to_channels_first(self, x):
+        if x.ndim != 3:
+            raise ValueError(
+                f"Expected 3D input, got shape {tuple(x.shape)}"
+            )
+
+        if x.shape[-1] == self.input_channels:
+            x = x.transpose(1, 2)
+
+        elif x.shape[1] != self.input_channels:
+            raise ValueError(
+                f"Expected input shape [B, L, {self.input_channels}] "
+                f"or [B, {self.input_channels}, L], "
+                f"got {tuple(x.shape)}"
+            )
+
+        return x
+
+    def forward_features(self, x):
+        x = self._to_channels_first(x)
+
+        h = self.features(x)
+
+        return h
+
+    def forward_temporal(self, x):
+        h = self.forward_features(x)
+
+        return h.transpose(1, 2)
+
+    def forward(self, x):
+        h = self.forward_features(x)
+
+        h = torch.flatten(
+            h,
+            start_dim=1,
+        )
+
+        h = self.embedding_head(h)
+
+        return h
+
+    def encode(
+        self,
+        x,
+        pool="identity",
+    ):
+        if pool not in (
+            None,
+            "identity",
+            "none",
+        ):
+            raise ValueError(
+                "TripletCNNBackbone already produces a "
+                "256-D embedding. Use pool='identity'."
+            )
+
+        return self.forward(x)
+
+    def get_output_dim(
+        self,
+        pool="identity",
+    ):
+        if pool not in (
+            None,
+            "identity",
+            "none",
+        ):
+            raise ValueError(
+                "TripletCNNBackbone only supports "
+                "pool='identity'."
+            )
+
+        return self.embedding_dim
+
+    def get_temporal_output_dim(self):
+        return 512
+
 
 class SharedCNN1D(nn.Module):
     def __init__(
@@ -172,19 +371,24 @@ class SharedCNN1D(nn.Module):
             f"Unsupported pooling mode: {pool}"
         )
 
-
 def build_cnn_backbone(
-    name: str = "shared_cnn_v1",
-    input_channels: int = 1,
-) -> SharedCNN1D:
+    name,
+    input_channels=1,
+    input_length=700,
+):
+
     if name == "shared_cnn_v1":
         return SharedCNN1D(
             input_channels=input_channels,
-            channels=(64, 128, 256, 320),
-            kernel_sizes=(11, 11, 11, 11),
-            strides=(2, 2, 2, 2),
+        )
+
+    if name == "triplet_cnn_v1":
+        return TripletCNNBackbone(
+            input_channels=input_channels,
+            input_length=input_length,
+            embedding_dim=256,
         )
 
     raise ValueError(
-        f"Unsupported backbone name: {name}"
+        f"Unknown CNN backbone: {name}"
     )
