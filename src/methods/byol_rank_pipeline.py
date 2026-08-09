@@ -263,6 +263,18 @@ class BYOL1D(nn.Module):
                 alpha=1.0 - self.ema_decay,
             )
 
+        for online_buffer, target_buffer in zip(
+            self.online_encoder.buffers(),
+            self.target_encoder.buffers(),
+            ):
+            target_buffer.copy_(online_buffer)
+
+        for online_buffer, target_buffer in zip(
+            self.online_projector.buffers(),
+            self.target_projector.buffers(),
+            ):
+            target_buffer.copy_(online_buffer)
+
     @staticmethod
     def byol_loss(
         prediction: torch.Tensor,
@@ -303,11 +315,11 @@ class BYOL1D(nn.Module):
         )
 
         online_z1 = self.online_projector(
-            online_h1
+            F.normalize(online_h1, dim=1)
         )
 
         online_z2 = self.online_projector(
-            online_h2
+            F.normalize(online_h2, dim=1)
         )
 
         prediction1 = self.online_predictor(
@@ -330,11 +342,11 @@ class BYOL1D(nn.Module):
             )
 
             target_z1 = self.target_projector(
-                target_h1
+                F.normalize(target_h1, dim=1)
             )
 
             target_z2 = self.target_projector(
-                target_h2
+                F.normalize(target_h2, dim=1)
             )
 
         loss = 0.5 * (
@@ -370,7 +382,7 @@ def train_byol(
     ema_decay: float = 0.996,
     n_epochs: int = 100,
     batch_size: int = 128,
-    lr: float = 3e-4,
+    lr: float = 1e-4,
     max_shift: int = 3,
     noise_std: float = 0.01,
     scale_std: float = 0.0,
@@ -395,13 +407,14 @@ def train_byol(
         drop_last=True,
     )
 
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         [
             parameter
             for parameter in model.parameters()
             if parameter.requires_grad
         ],
         lr=lr,
+        weight_decay=1e-5,
     )
 
     backbone_params = sum(
@@ -604,9 +617,9 @@ def main():
     n_train = 50000
     n_attack = 10000
 
-    n_epochs = 100
+    n_epochs = 10
     batch_size = 128
-    lr = 3e-4
+    lr = 1e-4
 
     backbone_name = "triplet_cnn_v1"
     pool_mode = "identity"
@@ -1056,7 +1069,7 @@ def main():
             "backbone_name": backbone_name,
             "backbone_params": backbone_params,
             "encoder_output_channels": (
-                encoder_output_channels
+                model.online_encoder.get_temporal_output_dim()
             ),
             "pool_mode": pool_mode,
             "pooled_repr_dim": (
