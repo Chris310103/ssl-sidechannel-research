@@ -838,8 +838,6 @@ def main():
             "encoder_output_channels": (
                 model.encoder.get_temporal_output_dim()
             ),
-            "pool_mode": "mean_max",
-            "readout_dim": model.readout_dim,
             "embedding_dim": model.embedding_dim,
             "pooled_repr_dim": model.repr_dim,
             "backbone_temporal_length": (
