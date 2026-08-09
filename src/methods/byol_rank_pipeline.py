@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.datasets.ascad_loader import load_ascad_split
@@ -802,7 +803,7 @@ def main():
     n_train = 50000
     n_attack = 10000
 
-    n_epochs = 100
+    n_epochs = 30
     batch_size = 128
     lr = 1e-4
     weight_decay = 1e-6
@@ -821,6 +822,7 @@ def main():
 
     target_byte = 2
     normalize_mode = None
+    probe_standardize = True
 
     trace_window = (0, 700)
 
@@ -840,6 +842,7 @@ def main():
         f"_window{window_start}-{window_end}"
         f"_emb{embedding_dim}"
         f"_scheduled"
+        f"_targetstate"
         f"_simclr_aug"
         f"_shift{max_shift}"
         f"_noise{str(noise_std).replace('.', 'p')}"
@@ -1100,24 +1103,75 @@ def main():
         y_train,
     )
 
+    feature_std = repr_train.std(
+        axis=0
+    )
+
+    print(
+        "Representation overall std:",
+        float(repr_train.std()),
+    )
+
+    print(
+        "Representation median feature std:",
+        float(np.median(feature_std)),
+    )
+
+    print(
+        "Representation dead feature ratio:",
+        float(np.mean(feature_std < 1e-6)),
+    )
+
+    print(
+        "Representation mean L2 norm:",
+        float(
+            np.linalg.norm(
+                repr_train,
+                axis=1,
+            ).mean()
+        ),
+    )
+
     print(
         "Training linear classifier "
         "on BYOL representations..."
     )
 
+    if probe_standardize:
+        scaler = StandardScaler()
+
+        probe_train = scaler.fit_transform(
+            repr_train
+        )
+
+        probe_attack = scaler.transform(
+            repr_attack
+        )
+
+        print(
+            "Linear probe feature standardization: enabled"
+        )
+    else:
+        probe_train = repr_train
+        probe_attack = repr_attack
+
+        print(
+            "Linear probe feature standardization: disabled"
+        )
+
     classifier = LogisticRegression(
-        max_iter=2000,
+        max_iter=10000,
         solver="lbfgs",
     )
 
     classifier.fit(
-        repr_train,
+        probe_train,
         y_train,
     )
 
     train_acc = float(
         classifier.score(
-            repr_train,
+            probe_train,
             y_train,
         )
     )
@@ -1133,7 +1187,7 @@ def main():
 
     attack_probas_seen = (
         classifier.predict_proba(
-            repr_attack
+            probe_attack
         )
     )
 
@@ -1285,6 +1339,8 @@ def main():
             "classifier": (
                 "LogisticRegression"
             ),
+            "probe_standardize": probe_standardize,
+            "probe_max_iter": 10000,
             "linear_probe_train_acc": round(
                 train_acc,
                 6,
