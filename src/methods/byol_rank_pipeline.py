@@ -180,31 +180,22 @@ class MLPHead(nn.Module):
 class BYOL1D(nn.Module):
     def __init__(
         self,
-        backbone_name: str = "triplet_cnn_v1",
-        pool_mode: str = "identity",
         proj_dim: int = 128,
         hidden_dim: int = 512,
         ema_decay: float = 0.996,
     ):
         super().__init__()
 
-        self.backbone_name = backbone_name
-        self.pool_mode = pool_mode
         self.proj_dim = proj_dim
         self.hidden_dim = hidden_dim
         self.ema_decay = ema_decay
 
         self.online_encoder = build_cnn_backbone(
-            name=backbone_name,
             input_channels=1,
             input_length=700,
         )
 
-        self.repr_dim = (
-            self.online_encoder.get_output_dim(
-                pool=pool_mode,
-            )
-        )
+        self.repr_dim = self.online_encoder.get_output_dim()
 
         self.pooled_repr_dim = self.repr_dim
 
@@ -302,15 +293,9 @@ class BYOL1D(nn.Module):
         x1: torch.Tensor,
         x2: torch.Tensor,
     ) -> torch.Tensor:
-        online_h1 = self.online_encoder.encode(
-            x1,
-            pool=self.pool_mode,
-        )
+        online_h1 = self.online_encoder.encode(x1)
 
-        online_h2 = self.online_encoder.encode(
-            x2,
-            pool=self.pool_mode,
-        )
+        online_h2 = self.online_encoder.encode(x2)
 
         online_z1 = self.online_projector(
             online_h1
@@ -329,15 +314,9 @@ class BYOL1D(nn.Module):
         )
 
         with torch.no_grad():
-            target_h1 = self.target_encoder.encode(
-                x1,
-                pool=self.pool_mode,
-            )
+            target_h1 = self.target_encoder.encode(x1)
 
-            target_h2 = self.target_encoder.encode(
-                x2,
-                pool=self.pool_mode,
-            )
+            target_h2 = self.target_encoder.encode(x2)
 
             target_z1 = self.target_projector(
                 target_h1
@@ -364,10 +343,7 @@ class BYOL1D(nn.Module):
         self,
         x: torch.Tensor,
     ) -> torch.Tensor:
-        return self.online_encoder.encode(
-            x,
-            pool=self.pool_mode,
-        )
+        return self.online_encoder.encode(x)
 
 
 
@@ -461,8 +437,6 @@ def build_warmup_cosine_scheduler(
 def train_byol(
     X_train,
     device,
-    backbone_name: str = "triplet_cnn_v1",
-    pool_mode: str = "identity",
     proj_dim: int = 128,
     hidden_dim: int = 512,
     ema_decay: float = 0.996,
@@ -477,8 +451,6 @@ def train_byol(
     mask_ratio: float = 0.0,
 ):
     model = BYOL1D(
-        backbone_name=backbone_name,
-        pool_mode=pool_mode,
         proj_dim=proj_dim,
         hidden_dim=hidden_dim,
         ema_decay=ema_decay,
@@ -728,21 +700,18 @@ def main():
     n_attack = 10000
 
     n_epochs = 30
-    batch_size = 256
+    batch_size = 128
     lr = 1e-4
     weight_decay = 1e-6
     warmup_epochs = 5
 
-    backbone_name = "triplet_cnn_v1"
-    pool_mode = "identity"
-
+    backbone_name = "triplet_network_cnn"
     proj_dim = 128
     hidden_dim = 512
     ema_decay = 0.996
 
     max_shift = 10
     noise_std = 0.05
-
     scale_std = 0.0
     mask_ratio = 0.0
 
@@ -765,9 +734,8 @@ def main():
     run_name = (
         f"byol_{backbone_name}"
         f"_window{window_start}-{window_end}"
-        f"_{pool_mode}"
         f"_scheduled"
-        f"_simclr_aug"
+        f"_weakaug"
         f"_shift{max_shift}"
         f"_noise{str(noise_std).replace('.', 'p')}"
         f"_ema{str(ema_decay).replace('.', 'p')}"
@@ -902,8 +870,6 @@ def main():
     model, loss_log = train_byol(
         X_train=X_train,
         device=device,
-        backbone_name=backbone_name,
-        pool_mode=pool_mode,
         proj_dim=proj_dim,
         hidden_dim=hidden_dim,
         ema_decay=ema_decay,
@@ -1134,7 +1100,7 @@ def main():
         ranks,
         save_path=rank_path,
         title=(
-            "BYOL Triplet CNN Backbone "
+            "BYOL Shared Triplet CNN "
             "+ Linear Probe Key Rank"
         ),
     )
@@ -1171,7 +1137,7 @@ def main():
     append_experiment_result(
         summary_path,
         {
-            "method": "BYOL-triplet-backbone-scheduled",
+            "method": "BYOL-shared-triplet-cnn",
             "run_name": run_name,
             "dataset": "ASCAD.h5",
             "seed": seed,
@@ -1190,7 +1156,7 @@ def main():
             "encoder_output_channels": (
                 model.online_encoder.get_temporal_output_dim()
             ),
-            "pool_mode": pool_mode,
+            "pool_mode": "identity",
             "pooled_repr_dim": (
                 model.pooled_repr_dim
             ),

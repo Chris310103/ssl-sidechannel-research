@@ -35,24 +35,17 @@ def set_seed(seed: int = 42) -> None:
 class SimCLRModel(nn.Module):
     def __init__(
         self,
-        backbone_name,
-        pool_mode,
         projector_hidden_dim,
         proj_dim,
     ):
         super().__init__()
 
-        self.backbone_name = backbone_name
-        self.pool_mode = pool_mode
-
         self.encoder = build_cnn_backbone(
-            name=backbone_name,
             input_channels=1,
+            input_length=700,
         )
 
-        self.repr_dim = self.encoder.get_output_dim(
-            pool=pool_mode,
-        )
+        self.repr_dim = self.encoder.get_output_dim()
 
         self.projector = nn.Sequential(
             nn.Linear(
@@ -68,10 +61,7 @@ class SimCLRModel(nn.Module):
         )
 
     def forward(self, x):
-        h = self.encoder.encode(
-            x,
-            pool=self.pool_mode,
-        )
+        h = self.encoder.encode(x)
 
         z = self.projector(h)
         z = F.normalize(z, dim=1)
@@ -79,10 +69,7 @@ class SimCLRModel(nn.Module):
         return h, z
 
     def encode(self, x):
-        return self.encoder.encode(
-            x,
-            pool=self.pool_mode,
-        )
+        return self.encoder.encode(x)
 
 
 def random_shift(
@@ -207,20 +194,16 @@ def nt_xent_loss(
 def train_simclr(
     X_train,
     device,
-    backbone_name,
-    pool_mode,
-    projector_hidden_dim,
-    proj_dim,
-    n_epochs,
-    batch_size,
-    lr,
-    temperature,
-    max_shift,
-    noise_std,
+    projector_hidden_dim: int = 320,
+    proj_dim: int = 128,
+    n_epochs: int = 100,
+    batch_size: int = 64,
+    lr: float = 1e-3,
+    temperature: float = 0.2,
+    max_shift: int = 10,
+    noise_std: float = 0.05,
 ):
     model = SimCLRModel(
-        backbone_name=backbone_name,
-        pool_mode=pool_mode,
         projector_hidden_dim=projector_hidden_dim,
         proj_dim=proj_dim,
     ).to(device)
@@ -398,13 +381,9 @@ def main():
     batch_size = 64
     lr = 1e-3
 
-    backbone_name = "triplet_cnn_v1"
-    pool_mode = "identity"
-
+    backbone_name = "triplet_network_cnn"
     projector_hidden_dim = 320
     proj_dim = 128
-
-    encoder_output_channels = 512
 
     temperature = 0.2
     max_shift = 10
@@ -422,7 +401,6 @@ def main():
     run_name = (
         f"simclr_{backbone_name}"
         f"_window{window_start}-{window_end}"
-        f"_{pool_mode}"
         f"_proj{proj_dim}"
         f"_ep{n_epochs}"
         f"_seed{seed}"
@@ -538,8 +516,6 @@ def main():
     model, loss_log = train_simclr(
         X_train=X_train,
         device=device,
-        backbone_name=backbone_name,
-        pool_mode=pool_mode,
         projector_hidden_dim=projector_hidden_dim,
         proj_dim=proj_dim,
         n_epochs=n_epochs,
@@ -747,7 +723,7 @@ def main():
         ranks,
         save_path=rank_path,
         title=(
-            "SimCLR Triplet CNN Backbone "
+            "SimCLR Triplet CNN Backbone"
             "+ Linear Probe Key Rank"
         ),
     )
@@ -783,7 +759,7 @@ def main():
     append_experiment_result(
         summary_path,
         {
-            "method": "SimCLR-triplet-backbone",
+            "method": "SimCLR-shared-triplet-cnn",
             "run_name": run_name,
             "dataset": "ASCAD.h5",
             "seed": seed,
@@ -795,9 +771,9 @@ def main():
             "backbone_name": backbone_name,
             "backbone_params": backbone_params,
             "encoder_output_channels": (
-                encoder_output_channels
+                model.encoder.get_temporal_output_dim()
             ),
-            "pool_mode": pool_mode,
+            "pool_mode": "identity",
             "pooled_repr_dim": model.repr_dim,
             "projector_hidden_dim": (
                 projector_hidden_dim
