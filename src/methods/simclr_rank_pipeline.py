@@ -31,7 +31,6 @@ def set_seed(seed: int = 42) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-
 class SimCLRModel(nn.Module):
     def __init__(
         self,
@@ -46,18 +45,39 @@ class SimCLRModel(nn.Module):
             input_length=700,
         )
 
-        self.readout_mode = "mean_max"
-
-        self.readout_dim = self.encoder.get_readout_dim(
-            mode=self.readout_mode,
-        )
-
         self.embedding_dim = embedding_dim
         self.repr_dim = embedding_dim
 
+        temporal_channels = (
+            self.encoder.get_output_channels()
+        )
+
+        temporal_length = (
+            self.encoder.get_temporal_length()
+        )
+
+        flatten_dim = (
+            temporal_channels
+            * temporal_length
+        )
+
         self.embedding_head = nn.Sequential(
+            nn.Flatten(),
+
             nn.Linear(
-                self.readout_dim,
+                flatten_dim,
+                4096,
+            ),
+            nn.ReLU(inplace=True),
+
+            nn.Linear(
+                4096,
+                4096,
+            ),
+            nn.ReLU(inplace=True),
+
+            nn.Linear(
+                4096,
                 embedding_dim,
             ),
             nn.ReLU(inplace=True),
@@ -68,40 +88,48 @@ class SimCLRModel(nn.Module):
                 embedding_dim,
                 projector_hidden_dim,
             ),
-            nn.BatchNorm1d(projector_hidden_dim),
+            nn.BatchNorm1d(
+                projector_hidden_dim
+            ),
             nn.ReLU(inplace=True),
+
             nn.Linear(
                 projector_hidden_dim,
                 proj_dim,
             ),
         )
 
-    def _readout(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        temporal = self.encoder.forward_temporal(x)
-
-        return pool_temporal(
-            temporal,
-            mode=self.readout_mode,
-        )
-
     def forward(self, x):
-        readout = self._readout(x)
+        temporal = (
+            self.encoder.forward_features(x)
+        )
+        # [B, 512, 10]
 
-        h = self.embedding_head(readout)
+        h = self.embedding_head(
+            temporal
+        )
+        # [B, 256]
 
         z = self.projector(h)
-        z = F.normalize(z, dim=1)
+        # [B, 128]
+
+        z = F.normalize(
+            z,
+            dim=1,
+        )
 
         return h, z
 
     def encode(self, x):
-        readout = self._readout(x)
+        temporal = (
+            self.encoder.forward_features(x)
+        )
 
-        return self.embedding_head(readout)
+        h = self.embedding_head(
+            temporal
+        )
 
+        return h
 
 def random_shift(
     x: torch.Tensor,
@@ -310,11 +338,6 @@ def train_simclr(
                     model.encoder.forward_temporal(batch_x)
                 )
 
-                readout_features = pool_temporal(
-                    temporal_features,
-                    mode=model.readout_mode,
-                )
-
                 print(
                     "Batch input shape:",
                     batch_x.shape,
@@ -323,11 +346,6 @@ def train_simclr(
                 print(
                     "Temporal feature shape:",
                     temporal_features.shape,
-                )
-
-                print(
-                    "Mean-max readout shape:",
-                    readout_features.shape,
                 )
 
                 print(
@@ -446,7 +464,6 @@ def main():
     run_name = (
         f"simclr_{backbone_name}"
         f"_window{window_start}-{window_end}"
-        f"_readout_meanmax"
         f"_emb{embedding_dim}"
         f"_proj{proj_dim}"
         f"_ep{n_epochs}"
