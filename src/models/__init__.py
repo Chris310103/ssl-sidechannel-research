@@ -1,9 +1,9 @@
 from src.models.cnn_zoo import (
-    SharedTripletCNNBackbone,
+    SharedCNN1D,
     build_cnn_backbone,
 )
 
 __all__ = [
-    "SharedTripletCNNBackbone",
+    "SharedCNN1D",
     "build_cnn_backbone",
 ]
