@@ -52,7 +52,7 @@ class CPCSharedModel(nn.Module):
             input_channels=1,
         )
 
-        self.latent_dim = self.encoder.output_channels
+        self.latent_dim = self.encoder.get_temporal_output_dim()
 
         self.pooled_repr_dim = self.encoder.get_output_dim(
             pool=pool_mode,
@@ -323,6 +323,20 @@ def train_cpc(
         "Downstream representation shape:",
         sample_representation.shape,
     )
+
+    if sample_z.shape[-1] != model.latent_dim:
+        raise ValueError(
+            "Unexpected CPC latent dimension: "
+            f"expected {model.latent_dim}, "
+            f"received {sample_z.shape[-1]}"
+        )
+
+    if sample_representation.shape[-1] != model.pooled_repr_dim:
+        raise ValueError(
+            "Unexpected CPC downstream representation dimension: "
+            f"expected {model.pooled_repr_dim}, "
+            f"received {sample_representation.shape[-1]}"
+        )
 
     model.train()
 
@@ -831,7 +845,7 @@ def main():
         ranks,
         save_path=rank_path,
         title=(
-            "CPC Shared CNN "
+            "CPC Restored Shared CNN "
             "+ Linear Probe Key Rank"
         ),
     )
@@ -873,7 +887,7 @@ def main():
     append_experiment_result(
         summary_path,
         {
-            "method": "CPC-shared-backbone",
+            "method": "CPC-restored-shared-backbone",
             "run_name": run_name,
             "dataset": "ASCAD.h5",
             "seed": seed,
