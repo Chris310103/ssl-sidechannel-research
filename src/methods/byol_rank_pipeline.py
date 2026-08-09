@@ -1,5 +1,6 @@
 from copy import deepcopy
 from pathlib import Path
+import math
 import random
 import time
 
@@ -240,16 +241,25 @@ class BYOL1D(nn.Module):
             parameter.requires_grad = requires_grad
 
     @torch.no_grad()
-    def update_target_network(self) -> None:
+    def update_target_network(
+        self,
+        ema_decay: float | None = None,
+    ) -> None:
+        decay = (
+            self.ema_decay
+            if ema_decay is None
+            else ema_decay
+        )
+
         for online_parameter, target_parameter in zip(
             self.online_encoder.parameters(),
             self.target_encoder.parameters(),
         ):
             target_parameter.data.mul_(
-                self.ema_decay
+                decay
             ).add_(
                 online_parameter.data,
-                alpha=1.0 - self.ema_decay,
+                alpha=1.0 - decay,
             )
 
         for online_parameter, target_parameter in zip(
@@ -257,23 +267,11 @@ class BYOL1D(nn.Module):
             self.target_projector.parameters(),
         ):
             target_parameter.data.mul_(
-                self.ema_decay
+                decay
             ).add_(
                 online_parameter.data,
-                alpha=1.0 - self.ema_decay,
+                alpha=1.0 - decay,
             )
-
-        for online_buffer, target_buffer in zip(
-            self.online_encoder.buffers(),
-            self.target_encoder.buffers(),
-            ):
-            target_buffer.copy_(online_buffer)
-
-        for online_buffer, target_buffer in zip(
-            self.online_projector.buffers(),
-            self.target_projector.buffers(),
-            ):
-            target_buffer.copy_(online_buffer)
 
     @staticmethod
     def byol_loss(
@@ -315,11 +313,11 @@ class BYOL1D(nn.Module):
         )
 
         online_z1 = self.online_projector(
-            F.normalize(online_h1, dim=1)
+            online_h1
         )
 
         online_z2 = self.online_projector(
-            F.normalize(online_h2, dim=1)
+            online_h2
         )
 
         prediction1 = self.online_predictor(
@@ -342,11 +340,11 @@ class BYOL1D(nn.Module):
             )
 
             target_z1 = self.target_projector(
-                F.normalize(target_h1, dim=1)
+                target_h1
             )
 
             target_z2 = self.target_projector(
-                F.normalize(target_h2, dim=1)
+                target_h2
             )
 
         loss = 0.5 * (
@@ -372,6 +370,94 @@ class BYOL1D(nn.Module):
         )
 
 
+
+def cosine_ema_decay(
+    step: int,
+    total_steps: int,
+    base_decay: float,
+) -> float:
+    if total_steps <= 1:
+        return 1.0
+
+    progress = min(
+        max(step / (total_steps - 1), 0.0),
+        1.0,
+    )
+
+    return 1.0 - (
+        1.0 - base_decay
+    ) * (
+        math.cos(math.pi * progress) + 1.0
+    ) * 0.5
+
+
+def build_weight_decay_groups(
+    model: nn.Module,
+    weight_decay: float,
+):
+    decay_params = []
+    no_decay_params = []
+
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+
+        if (
+            parameter.ndim == 1
+            or name.endswith(".bias")
+        ):
+            no_decay_params.append(parameter)
+        else:
+            decay_params.append(parameter)
+
+    return [
+        {
+            "params": decay_params,
+            "weight_decay": weight_decay,
+        },
+        {
+            "params": no_decay_params,
+            "weight_decay": 0.0,
+        },
+    ]
+
+
+def build_warmup_cosine_scheduler(
+    optimizer,
+    total_steps: int,
+    warmup_steps: int,
+):
+    def lr_lambda(step: int):
+        if warmup_steps > 0 and step < warmup_steps:
+            return float(step + 1) / float(warmup_steps)
+
+        remaining_steps = max(
+            1,
+            total_steps - warmup_steps,
+        )
+
+        progress = (
+            step - warmup_steps
+        ) / remaining_steps
+
+        progress = min(
+            max(progress, 0.0),
+            1.0,
+        )
+
+        return 0.5 * (
+            1.0
+            + math.cos(
+                math.pi * progress
+            )
+        )
+
+    return torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lr_lambda,
+    )
+
+
 def train_byol(
     X_train,
     device,
@@ -383,6 +469,8 @@ def train_byol(
     n_epochs: int = 100,
     batch_size: int = 128,
     lr: float = 1e-4,
+    weight_decay: float = 1e-6,
+    warmup_epochs: int = 5,
     max_shift: int = 3,
     noise_std: float = 0.01,
     scale_std: float = 0.0,
@@ -407,15 +495,31 @@ def train_byol(
         drop_last=True,
     )
 
-    optimizer = torch.optim.AdamW(
-        [
-            parameter
-            for parameter in model.parameters()
-            if parameter.requires_grad
-        ],
-        lr=lr,
-        weight_decay=1e-5,
+    parameter_groups = build_weight_decay_groups(
+        model=model,
+        weight_decay=weight_decay,
     )
+
+    optimizer = torch.optim.AdamW(
+        parameter_groups,
+        lr=lr,
+    )
+
+    total_steps = (
+        len(loader) * n_epochs
+    )
+
+    warmup_steps = (
+        len(loader) * warmup_epochs
+    )
+
+    scheduler = build_warmup_cosine_scheduler(
+        optimizer=optimizer,
+        total_steps=total_steps,
+        warmup_steps=warmup_steps,
+    )
+
+    global_step = 0
 
     backbone_params = sum(
         parameter.numel()
@@ -532,18 +636,20 @@ def train_byol(
 
             loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(
-                [
-                    parameter
-                    for parameter in model.parameters()
-                    if parameter.requires_grad
-                ],
-                max_norm=1.0,
-            )
-
             optimizer.step()
 
-            model.update_target_network()
+            ema_decay_now = cosine_ema_decay(
+                step=global_step,
+                total_steps=total_steps,
+                base_decay=ema_decay,
+            )
+
+            model.update_target_network(
+                ema_decay=ema_decay_now,
+            )
+
+            scheduler.step()
+            global_step += 1
 
             total_loss += loss.item()
             num_batches += 1
@@ -557,9 +663,13 @@ def train_byol(
             average_loss
         )
 
+        current_lr = optimizer.param_groups[0]["lr"]
+
         print(
             f"Epoch #{epoch}: "
-            f"byol_loss={average_loss:.6f}"
+            f"byol_loss={average_loss:.6f}, "
+            f"lr={current_lr:.8f}, "
+            f"ema={ema_decay_now:.6f}"
         )
 
     return model, loss_log
@@ -617,14 +727,14 @@ def main():
     n_train = 50000
     n_attack = 10000
 
-    n_epochs = 50
+    n_epochs = 30
     batch_size = 128
     lr = 1e-4
+    weight_decay = 1e-6
+    warmup_epochs = 5
 
     backbone_name = "triplet_cnn_v1"
     pool_mode = "identity"
-
-    encoder_output_channels = 512
 
     proj_dim = 128
     hidden_dim = 512
@@ -655,6 +765,7 @@ def main():
         f"byol_{backbone_name}"
         f"_window{window_start}-{window_end}"
         f"_{pool_mode}"
+        f"_scheduled"
         f"_weakaug"
         f"_shift{max_shift}"
         f"_noise{str(noise_std).replace('.', 'p')}"
@@ -798,6 +909,8 @@ def main():
         n_epochs=n_epochs,
         batch_size=batch_size,
         lr=lr,
+        weight_decay=weight_decay,
+        warmup_epochs=warmup_epochs,
         max_shift=max_shift,
         noise_std=noise_std,
         scale_std=scale_std,
@@ -1057,7 +1170,7 @@ def main():
     append_experiment_result(
         summary_path,
         {
-            "method": "BYOL-triplet-backbone",
+            "method": "BYOL-triplet-backbone-scheduled",
             "run_name": run_name,
             "dataset": "ASCAD.h5",
             "seed": seed,
@@ -1066,6 +1179,11 @@ def main():
             "n_epochs": n_epochs,
             "batch_size": batch_size,
             "lr": lr,
+            "optimizer": "AdamW",
+            "weight_decay": weight_decay,
+            "warmup_epochs": warmup_epochs,
+            "lr_schedule": "warmup_cosine",
+            "ema_schedule": "cosine_to_1",
             "backbone_name": backbone_name,
             "backbone_params": backbone_params,
             "encoder_output_channels": (
