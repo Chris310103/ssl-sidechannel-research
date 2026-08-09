@@ -35,8 +35,9 @@ def set_seed(seed: int = 42) -> None:
 class SimCLRModel(nn.Module):
     def __init__(
         self,
-        projector_hidden_dim,
-        proj_dim,
+        embedding_dim: int = 256,
+        projector_hidden_dim: int = 320,
+        proj_dim: int = 128,
     ):
         super().__init__()
 
@@ -47,13 +48,24 @@ class SimCLRModel(nn.Module):
 
         self.readout_mode = "mean_max"
 
-        self.repr_dim = self.encoder.get_readout_dim(
+        self.readout_dim = self.encoder.get_readout_dim(
             mode=self.readout_mode,
+        )
+
+        self.embedding_dim = embedding_dim
+        self.repr_dim = embedding_dim
+
+        self.embedding_head = nn.Sequential(
+            nn.Linear(
+                self.readout_dim,
+                embedding_dim,
+            ),
+            nn.ReLU(inplace=True),
         )
 
         self.projector = nn.Sequential(
             nn.Linear(
-                self.repr_dim,
+                embedding_dim,
                 projector_hidden_dim,
             ),
             nn.BatchNorm1d(projector_hidden_dim),
@@ -64,13 +76,21 @@ class SimCLRModel(nn.Module):
             ),
         )
 
-    def forward(self, x):
+    def _readout(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
         temporal = self.encoder.forward_temporal(x)
 
-        h = pool_temporal(
+        return pool_temporal(
             temporal,
             mode=self.readout_mode,
         )
+
+    def forward(self, x):
+        readout = self._readout(x)
+
+        h = self.embedding_head(readout)
 
         z = self.projector(h)
         z = F.normalize(z, dim=1)
@@ -78,12 +98,9 @@ class SimCLRModel(nn.Module):
         return h, z
 
     def encode(self, x):
-        temporal = self.encoder.forward_temporal(x)
+        readout = self._readout(x)
 
-        return pool_temporal(
-            temporal,
-            mode=self.readout_mode,
-        )
+        return self.embedding_head(readout)
 
 
 def random_shift(
@@ -208,6 +225,7 @@ def nt_xent_loss(
 def train_simclr(
     X_train,
     device,
+    embedding_dim: int = 256,
     projector_hidden_dim: int = 320,
     proj_dim: int = 128,
     n_epochs: int = 100,
@@ -218,6 +236,7 @@ def train_simclr(
     noise_std: float = 0.05,
 ):
     model = SimCLRModel(
+        embedding_dim=embedding_dim,
         projector_hidden_dim=projector_hidden_dim,
         proj_dim=proj_dim,
     ).to(device)
@@ -288,7 +307,12 @@ def train_simclr(
 
             if epoch == 0 and batch_index == 0:
                 temporal_features = (
-                    model.encoder.forward_features(batch_x)
+                    model.encoder.forward_temporal(batch_x)
+                )
+
+                readout_features = pool_temporal(
+                    temporal_features,
+                    mode=model.readout_mode,
                 )
 
                 print(
@@ -302,9 +326,15 @@ def train_simclr(
                 )
 
                 print(
-                    "Common readout representation shape:",
+                    "Mean-max readout shape:",
+                    readout_features.shape,
+                )
+
+                print(
+                    "SimCLR embedding shape:",
                     h1.shape,
                 )
+
                 print(
                     "Projection shape:",
                     z1.shape,
@@ -396,6 +426,7 @@ def main():
     lr = 1e-3
 
     backbone_name = "triplet_network_cnn"
+    embedding_dim = 256
     projector_hidden_dim = 320
     proj_dim = 128
 
@@ -416,6 +447,7 @@ def main():
         f"simclr_{backbone_name}"
         f"_window{window_start}-{window_end}"
         f"_readout_meanmax"
+        f"_emb{embedding_dim}"
         f"_proj{proj_dim}"
         f"_ep{n_epochs}"
         f"_seed{seed}"
@@ -531,6 +563,7 @@ def main():
     model, loss_log = train_simclr(
         X_train=X_train,
         device=device,
+        embedding_dim=embedding_dim,
         projector_hidden_dim=projector_hidden_dim,
         proj_dim=proj_dim,
         n_epochs=n_epochs,
@@ -789,6 +822,8 @@ def main():
                 model.encoder.get_temporal_output_dim()
             ),
             "pool_mode": "mean_max",
+            "readout_dim": model.readout_dim,
+            "embedding_dim": model.embedding_dim,
             "pooled_repr_dim": model.repr_dim,
             "backbone_temporal_length": (
                 model.encoder.get_temporal_length()

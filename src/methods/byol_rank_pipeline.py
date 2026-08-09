@@ -180,12 +180,14 @@ class MLPHead(nn.Module):
 class BYOL1D(nn.Module):
     def __init__(
         self,
+        embedding_dim: int = 256,
         proj_dim: int = 128,
         hidden_dim: int = 512,
         ema_decay: float = 0.996,
     ):
         super().__init__()
 
+        self.embedding_dim = embedding_dim
         self.proj_dim = proj_dim
         self.hidden_dim = hidden_dim
         self.ema_decay = ema_decay
@@ -197,16 +199,25 @@ class BYOL1D(nn.Module):
 
         self.readout_mode = "mean_max"
 
-        self.repr_dim = (
+        self.readout_dim = (
             self.online_encoder.get_readout_dim(
                 mode=self.readout_mode,
             )
         )
 
-        self.pooled_repr_dim = self.repr_dim
+        self.repr_dim = embedding_dim
+        self.pooled_repr_dim = embedding_dim
+
+        self.online_embedding_head = nn.Sequential(
+            nn.Linear(
+                self.readout_dim,
+                embedding_dim,
+            ),
+            nn.ReLU(inplace=True),
+        )
 
         self.online_projector = MLPHead(
-            input_dim=self.pooled_repr_dim,
+            input_dim=embedding_dim,
             hidden_dim=hidden_dim,
             output_dim=proj_dim,
         )
@@ -221,13 +232,17 @@ class BYOL1D(nn.Module):
             self.online_encoder
         )
 
+        self.target_embedding_head = deepcopy(
+            self.online_embedding_head
+        )
+
         self.target_projector = deepcopy(
             self.online_projector
         )
 
         self._set_target_requires_grad(False)
 
-    def _encode_with(
+    def _readout_with(
         self,
         encoder,
         x: torch.Tensor,
@@ -239,11 +254,27 @@ class BYOL1D(nn.Module):
             mode=self.readout_mode,
         )
 
+    def _embed_with(
+        self,
+        encoder,
+        embedding_head,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        readout = self._readout_with(
+            encoder,
+            x,
+        )
+
+        return embedding_head(readout)
+
     def _set_target_requires_grad(
         self,
         requires_grad: bool,
     ) -> None:
         for parameter in self.target_encoder.parameters():
+            parameter.requires_grad = requires_grad
+
+        for parameter in self.target_embedding_head.parameters():
             parameter.requires_grad = requires_grad
 
         for parameter in self.target_projector.parameters():
@@ -263,6 +294,17 @@ class BYOL1D(nn.Module):
         for online_parameter, target_parameter in zip(
             self.online_encoder.parameters(),
             self.target_encoder.parameters(),
+        ):
+            target_parameter.data.mul_(
+                decay
+            ).add_(
+                online_parameter.data,
+                alpha=1.0 - decay,
+            )
+
+        for online_parameter, target_parameter in zip(
+            self.online_embedding_head.parameters(),
+            self.target_embedding_head.parameters(),
         ):
             target_parameter.data.mul_(
                 decay
@@ -311,9 +353,17 @@ class BYOL1D(nn.Module):
         x1: torch.Tensor,
         x2: torch.Tensor,
     ) -> torch.Tensor:
-        online_h1 = self._encode_with(self.online_encoder, x1)
+        online_h1 = self._embed_with(
+            self.online_encoder,
+            self.online_embedding_head,
+            x1,
+        )
 
-        online_h2 = self._encode_with(self.online_encoder, x2)
+        online_h2 = self._embed_with(
+            self.online_encoder,
+            self.online_embedding_head,
+            x2,
+        )
 
         online_z1 = self.online_projector(
             online_h1
@@ -332,9 +382,17 @@ class BYOL1D(nn.Module):
         )
 
         with torch.no_grad():
-            target_h1 = self._encode_with(self.target_encoder, x1)
+            target_h1 = self._embed_with(
+                self.target_encoder,
+                self.target_embedding_head,
+                x1,
+            )
 
-            target_h2 = self._encode_with(self.target_encoder, x2)
+            target_h2 = self._embed_with(
+                self.target_encoder,
+                self.target_embedding_head,
+                x2,
+            )
 
             target_z1 = self.target_projector(
                 target_h1
@@ -361,11 +419,11 @@ class BYOL1D(nn.Module):
         self,
         x: torch.Tensor,
     ) -> torch.Tensor:
-        return self._encode_with(
+        return self._embed_with(
             self.online_encoder,
+            self.online_embedding_head,
             x,
         )
-
 
 
 def cosine_ema_decay(
@@ -458,6 +516,7 @@ def build_warmup_cosine_scheduler(
 def train_byol(
     X_train,
     device,
+    embedding_dim: int = 256,
     proj_dim: int = 128,
     hidden_dim: int = 512,
     ema_decay: float = 0.996,
@@ -472,6 +531,7 @@ def train_byol(
     mask_ratio: float = 0.0,
 ):
     model = BYOL1D(
+        embedding_dim=embedding_dim,
         proj_dim=proj_dim,
         hidden_dim=hidden_dim,
         ema_decay=ema_decay,
@@ -545,18 +605,23 @@ def train_byol(
         ).float().to(device)
 
         temporal_features = (
-            model.online_encoder.forward_features(
+            model.online_encoder.forward_temporal(
                 sample_x
             )
         )
 
-        pooled_features = model.encode(
+        readout_features = pool_temporal(
+            temporal_features,
+            mode=model.readout_mode,
+        )
+
+        embedding_features = model.encode(
             sample_x
         )
 
         projected_features = (
             model.online_projector(
-                pooled_features
+                embedding_features
             )
         )
 
@@ -577,8 +642,13 @@ def train_byol(
     )
 
     print(
-        "Common readout representation shape:",
-        pooled_features.shape,
+        "Mean-max readout shape:",
+        readout_features.shape,
+    )
+
+    print(
+        "BYOL embedding shape:",
+        embedding_features.shape,
     )
 
     print(
@@ -727,6 +797,7 @@ def main():
     warmup_epochs = 5
 
     backbone_name = "triplet_network_cnn"
+    embedding_dim = 256
     proj_dim = 128
     hidden_dim = 512
     ema_decay = 0.996
@@ -756,8 +827,9 @@ def main():
         f"byol_{backbone_name}"
         f"_window{window_start}-{window_end}"
         f"_readout_meanmax"
+        f"_emb{embedding_dim}"
         f"_scheduled"
-        f"_weakaug"
+        f"_simclr_aug"
         f"_shift{max_shift}"
         f"_noise{str(noise_std).replace('.', 'p')}"
         f"_ema{str(ema_decay).replace('.', 'p')}"
@@ -892,6 +964,7 @@ def main():
     model, loss_log = train_byol(
         X_train=X_train,
         device=device,
+        embedding_dim=embedding_dim,
         proj_dim=proj_dim,
         hidden_dim=hidden_dim,
         ema_decay=ema_decay,
@@ -1122,7 +1195,7 @@ def main():
         ranks,
         save_path=rank_path,
         title=(
-            "BYOL Shared Triplet CNN Conv Backbone "
+            "BYOL Shared Triplet CNN + 256-D Embedding "
             "+ Linear Probe Key Rank"
         ),
     )
@@ -1179,6 +1252,8 @@ def main():
                 model.online_encoder.get_temporal_output_dim()
             ),
             "pool_mode": "mean_max",
+            "readout_dim": model.readout_dim,
+            "embedding_dim": model.embedding_dim,
             "pooled_repr_dim": (
                 model.pooled_repr_dim
             ),

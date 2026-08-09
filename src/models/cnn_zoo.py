@@ -1,7 +1,22 @@
 import torch
 import torch.nn as nn
 
+
 class SharedTripletCNNBackbone(nn.Module):
+    """
+    Shared CNN backbone taken from the convolutional blocks of the
+    Triplet Network cnn_best() architecture.
+
+    Input:
+        [B, L, 1] or [B, 1, L]
+
+    Output:
+        channels-first: [B, 512, 10] for L=700
+        temporal:       [B, 10, 512] for L=700
+
+    The original Flatten -> FC4096 -> FC4096 -> task head is intentionally
+    excluded. Each method owns its own head.
+    """
 
     def __init__(
         self,
