@@ -728,7 +728,7 @@ def main():
     n_attack = 10000
 
     n_epochs = 30
-    batch_size = 128
+    batch_size = 256
     lr = 1e-4
     weight_decay = 1e-6
     warmup_epochs = 5
