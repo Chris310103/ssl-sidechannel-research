@@ -234,7 +234,7 @@ class TS2VecSharedModel(nn.Module):
         )
 
         self.temporal_repr_dim = (
-            self.encoder.output_channels
+            self.encoder.get_temporal_output_dim()
         )
 
         self.pooled_repr_dim = (
@@ -478,6 +478,20 @@ def train_ts2vec(
         "Downstream representation shape:",
         sample_pooled.shape,
     )
+
+    if sample_temporal.shape[-1] != model.temporal_repr_dim:
+        raise ValueError(
+            "Unexpected TS2Vec temporal representation dimension: "
+            f"expected {model.temporal_repr_dim}, "
+            f"received {sample_temporal.shape[-1]}"
+        )
+
+    if sample_pooled.shape[-1] != model.pooled_repr_dim:
+        raise ValueError(
+            "Unexpected TS2Vec downstream representation dimension: "
+            f"expected {model.pooled_repr_dim}, "
+            f"received {sample_pooled.shape[-1]}"
+        )
 
     model.train()
 
@@ -1043,7 +1057,7 @@ def main():
         ranks,
         save_path=rank_path,
         title=(
-            "TS2Vec Shared CNN "
+            "TS2Vec Restored Shared CNN "
             "+ Linear Probe Key Rank"
         ),
     )
@@ -1088,7 +1102,7 @@ def main():
         summary_path,
         {
             "method": (
-                "TS2Vec-shared-backbone"
+                "TS2Vec-restored-shared-backbone"
             ),
             "run_name": run_name,
             "dataset": "ASCAD.h5",

@@ -63,7 +63,7 @@ class MAESharedCNN1D(nn.Module):
         )
 
         self.encoder_output_channels = (
-            self.encoder.output_channels
+            self.encoder.get_temporal_output_dim()
         )
 
         self.pooled_repr_dim = (
@@ -380,6 +380,27 @@ def train_mae(
         "Sample masked reconstruction loss:",
         float(sample_loss.item()),
     )
+
+    if sample_temporal_features.shape[-1] != model.encoder_output_channels:
+        raise ValueError(
+            "Unexpected MAE temporal channel dimension: "
+            f"expected {model.encoder_output_channels}, "
+            f"received {sample_temporal_features.shape[-1]}"
+        )
+
+    if sample_reconstruction.shape != sample_x.shape:
+        raise ValueError(
+            "Unexpected MAE reconstruction shape: "
+            f"expected {tuple(sample_x.shape)}, "
+            f"received {tuple(sample_reconstruction.shape)}"
+        )
+
+    if sample_representation.shape[-1] != model.pooled_repr_dim:
+        raise ValueError(
+            "Unexpected MAE downstream representation dimension: "
+            f"expected {model.pooled_repr_dim}, "
+            f"received {sample_representation.shape[-1]}"
+        )
 
     model.train()
 
@@ -871,7 +892,7 @@ def main():
         ranks,
         save_path=rank_path,
         title=(
-            "MAE Shared CNN "
+            "MAE Restored Shared CNN "
             "+ Linear Probe Key Rank"
         ),
     )
@@ -919,7 +940,7 @@ def main():
     append_experiment_result(
         summary_path,
         {
-            "method": "MAE-shared-backbone",
+            "method": "MAE-restored-shared-backbone",
             "run_name": run_name,
             "dataset": "ASCAD.h5",
             "seed": seed,
