@@ -1,4 +1,0 @@
-method,dataset,n_train,n_attack,n_epochs,batch_size,lr,base_dim,repr_dim,proj_dim,k_steps,num_t_samples,classifier,target_byte,device,train_start_time,train_end_time,train_time_sec,train_time_ms,final_rank,min_rank,rank0_trace,figure_path,checkpoint_path
-TS2Vec,ASCAD.h5,50000,10000,10,64,0.001,,320,,,,LogisticRegression,2,cuda,1780657052.7242622,1780657378.7855542,326.06,326061.29,0,0,238,outputs/figures/ts2vec/ts2vec_linear_probe_rank.png,
-SimCLR,ASCAD.h5,50000,10000,10,64,0.001,,320,128,,,LogisticRegression,2,cuda,1780657409.0213969,1780657455.2263458,46.2,46204.95,0,0,8058,outputs/figures/simclr/simclr_linear_probe_rank.png,outputs/checkpoints/simclr/simclr_encoder.pt
-CPC,ASCAD.h5,50000,10000,30,64,0.001,,320,,3,1,LogisticRegression,2,cuda,1780657484.0444248,1780657589.014612,104.97,104970.19,138,0,15,outputs/figures/cpc/cpc_linear_probe_rank.png,outputs/checkpoints/cpc/cpc_encoder.pt
