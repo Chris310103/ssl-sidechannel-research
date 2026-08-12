@@ -33,62 +33,35 @@ def set_seed(seed: int = 42) -> None:
 
 
 class SimCLRModel(nn.Module):
-    def __init__(
-        self,
-        backbone_name,
-        pool_mode,
-        projector_hidden_dim,
-        proj_dim,
-    ):
+    def __init__(self, backbone_name, pool_mode, projector_hidden_dim, proj_dim):
         super().__init__()
 
         self.backbone_name = backbone_name
         self.pool_mode = pool_mode
 
-        self.encoder = build_cnn_backbone(
-            name=backbone_name,
-            input_channels=1,
-        )
+        self.encoder = build_cnn_backbone(input_channels=1, input_length=700)
 
-        self.repr_dim = self.encoder.get_output_dim(
-            pool=pool_mode,
-        )
+        self.repr_dim = self.encoder.get_output_dim(pool=pool_mode)
 
         self.projector = nn.Sequential(
-            nn.Linear(
-                self.repr_dim,
-                projector_hidden_dim,
-            ),
+            nn.Linear(self.repr_dim, projector_hidden_dim),
             nn.BatchNorm1d(projector_hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(
-                projector_hidden_dim,
-                proj_dim,
-            ),
+            nn.Linear(projector_hidden_dim, proj_dim),
         )
 
     def forward(self, x):
-        h = self.encoder.encode(
-            x,
-            pool=self.pool_mode,
-        )
-
+        h = self.encoder.encode(x, pool=self.pool_mode)
         z = self.projector(h)
         z = F.normalize(z, dim=1)
 
         return h, z
 
     def encode(self, x):
-        return self.encoder.encode(
-            x,
-            pool=self.pool_mode,
-        )
+        return self.encoder.encode(x, pool=self.pool_mode)
 
 
-def random_shift(
-    x: torch.Tensor,
-    max_shift: int = 10,
-) -> torch.Tensor:
+def random_shift(x: torch.Tensor, max_shift: int = 10) -> torch.Tensor:
     if max_shift <= 0:
         return x
 
@@ -111,10 +84,7 @@ def random_shift(
     return shifted
 
 
-def add_gaussian_noise(
-    x: torch.Tensor,
-    noise_std: float = 0.05,
-) -> torch.Tensor:
+def add_gaussian_noise(x: torch.Tensor, noise_std: float = 0.05) -> torch.Tensor:
     if noise_std <= 0:
         return x
 
@@ -132,11 +102,7 @@ def add_gaussian_noise(
     return x + noise
 
 
-def augment_traces(
-    x: torch.Tensor,
-    max_shift: int = 10,
-    noise_std: float = 0.05,
-) -> torch.Tensor:
+def augment_traces(x: torch.Tensor, max_shift: int = 10, noise_std: float = 0.05) -> torch.Tensor:
     x = random_shift(
         x,
         max_shift=max_shift,
@@ -150,11 +116,7 @@ def augment_traces(
     return x
 
 
-def nt_xent_loss(
-    z1: torch.Tensor,
-    z2: torch.Tensor,
-    temperature: float = 0.2,
-) -> torch.Tensor:
+def nt_xent_loss(z1: torch.Tensor, z2: torch.Tensor, temperature: float = 0.2) -> torch.Tensor:
     if z1.shape != z2.shape:
         raise ValueError(
             f"z1 and z2 must have the same shape, "
@@ -217,12 +179,14 @@ def train_simclr(
     temperature: float = 0.2,
     max_shift: int = 10,
     noise_std: float = 0.05,
+    input_length: int = 700
 ):
     model = SimCLRModel(
         backbone_name=backbone_name,
         pool_mode=pool_mode,
         projector_hidden_dim=projector_hidden_dim,
         proj_dim=proj_dim,
+        input_length=input_length
     ).to(device)
 
     dataset = TensorDataset(
