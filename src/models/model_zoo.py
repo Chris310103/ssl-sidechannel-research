@@ -8,6 +8,10 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, Union
 
 
+class TransformerBest():
+    pass
+
+
 class CnnBestNorm(nn.Module):
     """
     PyTorch implementation of the 'cnn_best_norm' architecture.
@@ -320,3 +324,24 @@ def build_cnn_best_norm_backbone(input_channels: int = 1, input_length: int = 14
 
 def build_transformer_backbone(input_channels: int=1, input_length: int = 1400):
     pass
+
+def build_backbone(model_name: str = "shared_cnn_v1", input_channels: int = 1, input_length: int = 700, **kwargs):
+    """
+    Factory for all supported backbones.
+    
+    Returns a model with:
+      - forward_features(x)     -> (B, L_out, C_out)
+      - encode(x, pool)         -> (B, rep_dim)  (global pooling or flat)
+      - get_output_dim(pool)    -> int
+    """
+    if model_name == "shared_cnn_v1":
+        return SharedCNN1D(input_channels=input_channels, input_length=input_length)
+    
+    elif model_name == "cnn_best_norm":
+        return CnnBestNorm(input_channels=input_channels, input_length=input_length) 
+    
+    elif model_name == "transformer_sca_best":
+        return TransformerBest(input_channels=input_channels, input_length=input_length)
+    
+    else:
+        raise ValueError(f"Unknown backbone: {name}")
