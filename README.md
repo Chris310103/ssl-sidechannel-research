@@ -4,11 +4,11 @@ This repository is for a remote research internship project on adapting self-sup
 
 ## Goal
 Adapt the following self-supervised learning methods to side-channel analysis:
-- TS2Vec
-- SimCLR
+- TS2Vec - 
+- SimCLR - 
 - CPC (Contrastive Predicitive Coding) - https://github.com/Spijkervet/contrastive-predictive-coding
-- MAE
-- BYOL
+- MAE - https://github.com/facebookresearch/mae
+- BYOL - https://github.com/sthalles/PyTorch-BYOL
 
 ## Initial Tasks
 - Read the reference papers and repositories
