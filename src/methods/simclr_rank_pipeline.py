@@ -1,4 +1,3 @@
-import os
 import sys
 import argparse
 import random
@@ -9,12 +8,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from pathlib import Path
-from sklearn.linear_model import LogisticRegression
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.datasets.ascad_loader import load_ascad_split
-from src.evaluation.rank_eval import compute_rank_curve, expand_proba_to_256, plot_rank_curve
-from src.models.cnn_zoo import build_backbone
+from src.methods.knn_distinguisher import (
+    compute_knn_candidate_accuracies,
+    rank_key_candidates,
+    split_nonprofiling_attack_data,
+)
+from src.models.model_zoo import build_backbone
+from src.utils.key_rank import metadata_true_key
+from src.utils.trace_transforms import (
+    ensure_trace_matrix,
+    make_trace_view,
+    parse_augmentation_family,
+    prepare_model_input,
+    VALID_AUGMENTATIONS,
+)
 from src.utils.experiment_logger import append_experiment_result
 from src.utils.get_device import get_device
 
@@ -61,41 +71,6 @@ class SimCLRModel(nn.Module):
         return self.encoder.encode(x, pool=self.pool_mode)
 
 
-def random_shift(x: torch.Tensor, max_shift: int = 10) -> torch.Tensor:
-    ''' So, the x here is a batch of samples, in another word, it is a matrix '''
-    if max_shift <= 0:
-        raise ValueError('max_shift value has to be greater than 0, now is: ', max_shift)
-
-    shifted = torch.empty_like(x)
-
-    shifts = torch.randint(low=-max_shift, high=max_shift + 1, size=(x.shape[0],), device=x.device)
-
-    for i, shift in enumerate(shifts):
-        shifted[i] = torch.roll(x[i], shifts=int(shift.item()), dims=0)
-
-    return shifted
-
-
-def add_gaussian_noise(x: torch.Tensor, noise_std: float = 0.05) -> torch.Tensor:
-    if noise_std <= 0:
-        return x
-
-    trace_std = x.std(dim=1, keepdim=True).clamp_min(1e-6)
-
-    noise = (torch.randn_like(x) * trace_std * noise_std)
-
-    return x + noise
-
-
-def augment_traces(x: torch.Tensor, max_shift: int = 10, noise_std: float = 0.05) -> torch.Tensor:
-    # I guess this is wrong, we want different augment method, not combing 2 into 1 !!!
-    x = random_shift(x, max_shift=max_shift)
-
-    x = add_gaussian_noise(x, noise_std=noise_std)
-
-    return x
-
-
 def nt_xent_loss(z1: torch.Tensor, z2: torch.Tensor, temperature: float = 0.2) -> torch.Tensor:
     if z1.shape != z2.shape:
         raise ValueError(
@@ -126,6 +101,7 @@ def nt_xent_loss(z1: torch.Tensor, z2: torch.Tensor, temperature: float = 0.2) -
 def train_simclr(
     X_train,
     device,
+    trace_window,
     backbone_name: str = "shared_cnn_v1",
     pool_mode: str = "mean_max",
     projector_hidden_dim: int = 320,
@@ -134,10 +110,16 @@ def train_simclr(
     batch_size: int = 64,
     lr: float = 1e-3,
     temperature: float = 0.2,
-    max_shift: int = 10,
+    max_shift: int = 5,
     noise_std: float = 0.05,
+    denoise_kernel_size: int = 5,
+    view_augmentation: str = "random",
+    augmentation_family=("random_shift", "denoise", "gaussian_noise"),
+    augmentation_probability: float = 0.5,
     input_length: int = 700
 ):
+    X_train = ensure_trace_matrix(X_train)
+
     model = SimCLRModel(
         backbone_name=backbone_name,
         pool_mode=pool_mode,
@@ -171,17 +153,41 @@ def train_simclr(
         for batch_index, (batch_x,) in enumerate(loader):
             batch_x = batch_x.to(device)
 
-            x1 = augment_traces(batch_x, max_shift=max_shift, noise_std=noise_std)
+            x1 = make_trace_view(
+                batch_x,
+                trace_window=trace_window,
+                augmentation=view_augmentation,
+                augmentation_family=augmentation_family,
+                augmentation_probability=augmentation_probability,
+                max_shift=max_shift,
+                noise_std=noise_std,
+                denoise_kernel_size=denoise_kernel_size,
+            )
 
-            x2 = augment_traces(batch_x, max_shift=max_shift, noise_std=noise_std)
+            x2 = make_trace_view(
+                batch_x,
+                trace_window=trace_window,
+                augmentation=view_augmentation,
+                augmentation_family=augmentation_family,
+                augmentation_probability=augmentation_probability,
+                max_shift=max_shift,
+                noise_std=noise_std,
+                denoise_kernel_size=denoise_kernel_size,
+            )
 
             h1, z1 = model(x1)
             _, z2 = model(x2)
 
             if epoch == 0 and batch_index == 0:
-                temporal_features = (model.encoder.forward_features(batch_x))
+                model_input = prepare_model_input(
+                    batch_x,
+                    trace_window=trace_window,
+                )
+
+                temporal_features = (model.encoder.forward_features(model_input))
 
                 print("Batch input shape:", batch_x.shape)
+                print("Model input shape:", model_input.shape)
 
                 print("Temporal feature shape:", temporal_features.shape)
 
@@ -211,8 +217,10 @@ def encode_representations(
     model,
     X,
     device,
+    trace_window,
     batch_size: int = 256,
     ):
+    X = ensure_trace_matrix(X)
     
     dataset = TensorDataset(torch.from_numpy(X).float())
 
@@ -225,6 +233,10 @@ def encode_representations(
     with torch.no_grad():
         for (batch_x,) in loader:
             batch_x = batch_x.to(device)
+            batch_x = prepare_model_input(
+                batch_x,
+                trace_window=trace_window,
+            )
 
             h = model.encode(batch_x)
 
@@ -234,35 +246,39 @@ def encode_representations(
 
 
 def main(opts):
-    ascad_path = os.path.join(PROJECT_ROOT, "data", "raw", "ascad", "ASCAD.h5")
+    ascad_path = Path(opts.input) if opts.input else PROJECT_ROOT / "data" / "raw" / "ascad" / "ASCAD.h5"
 
-    seed = 47
+    seed = opts.seed
 
-    n_train = 50000
-    n_finetune = 1000
-    n_attack = 10000
+    n_train = opts.n_train
+    n_finetune = opts.n_finetune
+    n_attack = opts.n_attack
 
-    n_epochs = 100
-    batch_size = 64
-    lr = 1e-3
+    n_epochs = opts.epochs
+    batch_size = opts.batch_size
+    lr = opts.lr
 
     backbone_name = opts.backbone_name
     pool_mode = opts.pool_mode
 
-    projector_hidden_dim = 320
-    proj_dim = 128
+    projector_hidden_dim = opts.projector_hidden_dim
+    proj_dim = opts.proj_dim
 
-    encoder_output_channels = 320
-    pooled_repr_dim = 640
+    temperature = opts.temperature
+    max_shift = opts.max_shift
+    noise_std = opts.noise_std
+    denoise_kernel_size = opts.denoise_kernel_size
+    view_augmentation = opts.view_augmentation
+    augmentation_family = parse_augmentation_family(opts.augmentations)
+    augmentation_probability = opts.augmentation_probability
 
-    temperature = 0.2
-    max_shift = 10
-    noise_std = 0.05
+    target_byte = opts.target_byte
+    normalize_mode = opts.normalize
+    leakage_model = opts.leakage_model
+    knn_neighbors = opts.knn_neighbors
+    knn_weights = opts.knn_weights
 
-    target_byte = 2
-    normalize_mode = None
-
-    trace_window = (0, 700)
+    trace_window = (opts.window_start, opts.window_end)
     window_start, window_end = trace_window
     window_size = window_end - window_start
 
@@ -274,53 +290,52 @@ def main(opts):
         f"_{pool_mode}"
         f"_proj{proj_dim}"
         f"_ep{n_epochs}"
+        f"_knn{knn_neighbors}"
         f"_seed{seed}"
     )
 
-    figure_dir = os.path.join(PROJECT_ROOT, "outputs", "figures", run_name)
-
-    repr_dir = os.path.join(PROJECT_ROOT, "outputs", "representations", run_name)
-
-    checkpoint_dir = os.path.join(PROJECT_ROOT, "outputs", "checkpoints", run_name)
+    figure_dir = PROJECT_ROOT / "outputs" / "figures" / run_name
+    repr_dir = PROJECT_ROOT / "outputs" / "representations" / run_name
+    checkpoint_dir = PROJECT_ROOT / "outputs" / "checkpoints" / run_name
 
     figure_dir.mkdir(parents=True, exist_ok=True)
-
     repr_dir.mkdir(parents=True, exist_ok=True)
-
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Loading ASCAD profiling traces...")
+    print("Loading full ASCAD attack traces with metadata...")
 
-    X_profiling, y_profiling = load_ascad_split(
+    X_attack, _, metadata_attack = load_ascad_split(
         h5_path=ascad_path,
-        split="profiling",
-        add_channel=True,
+        split="attack",
+        add_channel=False,
         normalize=normalize_mode,
-        load_metadata=False,
-        trace_window=trace_window,
+        load_metadata=True,
+        trace_window=None,
     )
 
-    print("Loading ASCAD attack traces with metadata...")
-
-    X_attack, y_attack, x_test, y_test = load_ascad_split(h5_path=ascad_path, split="attack", add_channel=True, normalize=normalize_mode, load_metadata=True, trace_window=trace_window)
-
-    X_train = X_profiling[:n_train]
-    y_train = y_profiling[:n_train]
-
-    X_attack_small = X_attack[:n_attack]
-
-    metadata_attack_small = (metadata_attack[:n_attack])
+    (
+        X_ssl_train,
+        X_knn_train,
+        metadata_knn_train,
+        X_knn_eval,
+        metadata_knn_eval,
+    ) = split_nonprofiling_attack_data(
+        X_attack=X_attack,
+        metadata_attack=metadata_attack,
+        n_ssl_train=n_train,
+        n_knn_train=n_finetune,
+        n_knn_eval=n_attack,
+        n_neighbors=knn_neighbors,
+    )
 
     print("Trace window:", trace_window)
     print("Window size:", window_size)
-
-    print("X_train shape:", X_train.shape)
-
-    print("y_train shape:", y_train.shape)
-
-    print("X_attack shape:", X_attack_small.shape)
-
-    print("metadata_attack shape:", metadata_attack_small.shape)
+    print("Full trace length:", X_attack.shape[1])
+    print("X_ssl_train shape:", X_ssl_train.shape)
+    print("X_knn_train shape:", X_knn_train.shape)
+    print("metadata_knn_train shape:", metadata_knn_train.shape)
+    print("X_knn_eval shape:", X_knn_eval.shape)
+    print("metadata_knn_eval shape:", metadata_knn_eval.shape)
 
     device = get_device(prefer_mps=False)
 
@@ -330,8 +345,9 @@ def main(opts):
     train_start_time = time.time()
 
     model, loss_log = train_simclr(
-        X_train=X_train,
+        X_train=X_ssl_train,
         device=device,
+        trace_window=trace_window,
         backbone_name=backbone_name,
         pool_mode=pool_mode,
         projector_hidden_dim=projector_hidden_dim,
@@ -342,6 +358,11 @@ def main(opts):
         temperature=temperature,
         max_shift=max_shift,
         noise_std=noise_std,
+        denoise_kernel_size=denoise_kernel_size,
+        view_augmentation=view_augmentation,
+        augmentation_family=augmentation_family,
+        augmentation_probability=augmentation_probability,
+        input_length=window_size,
     )
 
     train_end_time = time.time()
@@ -360,105 +381,101 @@ def main(opts):
 
     print(f"Training time: {train_time_ms:.2f} ms")
 
-    checkpoint_path = os.path.join(checkpoint_dir, f"{run_name}_encoder.pt")
+    checkpoint_path = checkpoint_dir / f"{run_name}_encoder.pt"
 
     torch.save(model.state_dict(), checkpoint_path)
 
     print("Saved checkpoint to:", checkpoint_path)
 
-    print("Encoding profiling representations...")
+    print("Encoding KNN-train representations...")
 
-    repr_train = encode_representations(model=model, X=X_train, device=device, batch_size=256)
+    repr_knn_train = encode_representations(
+        model=model,
+        X=X_knn_train,
+        device=device,
+        trace_window=trace_window,
+        batch_size=opts.encode_batch_size,
+    )
 
-    print("Encoding attack representations...")
+    print("Encoding KNN-eval representations...")
 
-    repr_attack = encode_representations(model=model, X=X_attack_small, device=device, batch_size=256)
+    repr_knn_eval = encode_representations(
+        model=model,
+        X=X_knn_eval,
+        device=device,
+        trace_window=trace_window,
+        batch_size=opts.encode_batch_size,
+    )
 
-    print("repr_train shape:", repr_train.shape)
+    print("repr_knn_train shape:", repr_knn_train.shape)
 
-    print("repr_attack shape:", repr_attack.shape)
+    print("repr_knn_eval shape:", repr_knn_eval.shape)
 
     expected_repr_dim = model.repr_dim
 
-    if repr_train.shape[1] != expected_repr_dim:
-        raise ValueError("Unexpected representation dimension-> expected {expected_repr_dim}, received {repr_train.shape[1]}")
+    if repr_knn_train.shape[1] != expected_repr_dim:
+        raise ValueError(
+            f"Unexpected representation dimension: expected {expected_repr_dim}, "
+            f"received {repr_knn_train.shape[1]}"
+        )
 
-    np.save(os.path.join(repr_dir, "repr_train.npy"), repr_train)
+    np.save(repr_dir / "repr_knn_train.npy", repr_knn_train)
+    np.save(repr_dir / "repr_knn_eval.npy", repr_knn_eval)
 
-    np.save(os.path.join(repr_dir, "repr_attack.npy"), repr_attack)
+    print("Training 256 candidate KNNs and computing candidate accuracies...")
 
-    np.save(os.path.join(repr_dir, "y_train.npy"), y_train)
-
-    print("Training linear classifier on SimCLR representations...")
-
-    classifier = LogisticRegression(max_iter=2000, solver="lbfgs")
-
-    classifier.fit(repr_train, y_train)
-
-    train_acc = float(classifier.score(repr_train, y_train))
-
-    print("Linear probe train accuracy:", train_acc)
-
-    print("Predicting attack probabilities...")
-
-    attack_probas_seen = (classifier.predict_proba(repr_attack))
-
-    attack_probas = expand_proba_to_256(attack_probas_seen, classes=classifier.classes_)
-
-    print("attack_probas shape:", attack_probas.shape)
-
-    print("Computing key rank curve...")
-
-    ranks = compute_rank_curve(
-        probas=attack_probas,
-        metadata=metadata_attack_small,
+    candidate_accuracies = compute_knn_candidate_accuracies(
+        repr_train=repr_knn_train,
+        metadata_train=metadata_knn_train,
+        repr_eval=repr_knn_eval,
+        metadata_eval=metadata_knn_eval,
         target_byte=target_byte,
-        max_traces=n_attack,
-        use_log=True,
+        n_neighbors=knn_neighbors,
+        leakage_model=leakage_model,
+        weights=knn_weights,
     )
 
-    final_rank = int(ranks[-1])
-    min_rank = int(ranks.min())
-
-    rank0_indices = np.where(ranks == 0)[0]
-
-    rank0_trace = (int(rank0_indices[0] + 1) if len(rank0_indices) > 0 else -1)
-
-    print("Final rank:", final_rank)
-    print("Minimum rank:", min_rank)
-    print("Rank-0 trace:", rank0_trace)
-
-    rank_path = os.path.join(figure_dir, f"{run_name}_linear_probe_rank.png")
-
-    ranks_path = os.path.join(repr_dir, f"{run_name}_linear_probe_ranks.npy")
-
-    plot_rank_curve(
-        ranks,
-        save_path=rank_path,
-        title=(
-            "SimCLR Restored Shared CNN "
-            "+ Linear Probe Key Rank"
-        ),
+    true_key = metadata_true_key(
+        metadata_knn_eval,
+        target_byte=target_byte,
+    )
+    ranked_keys, true_key_rank = rank_key_candidates(
+        candidate_scores=candidate_accuracies,
+        true_key=true_key,
     )
 
-    np.save(ranks_path, ranks)
+    best_key = int(ranked_keys[0])
+    best_accuracy = float(candidate_accuracies[best_key])
+    true_key_accuracy = float(candidate_accuracies[true_key])
 
-    print("Saved rank curve to:", rank_path)
+    print("True key:", true_key)
+    print("Best key:", best_key)
+    print("Best candidate accuracy:", best_accuracy)
+    print("True-key candidate accuracy:", true_key_accuracy)
+    print("True-key rank among candidate KNNs:", true_key_rank)
 
-    print("Saved ranks to:", ranks_path)
+    candidate_scores_path = repr_dir / f"{run_name}_candidate_accuracies.npy"
+    ranked_keys_path = repr_dir / f"{run_name}_ranked_keys.npy"
 
-    summary_path = os.path.join(PROJECT_ROOT, "outputs", "logs", "experiment_summary.csv")
+    np.save(candidate_scores_path, candidate_accuracies)
+    np.save(ranked_keys_path, ranked_keys)
+
+    print("Saved candidate accuracies to:", candidate_scores_path)
+    print("Saved ranked keys to:", ranked_keys_path)
+
+    summary_path = PROJECT_ROOT / "outputs" / "logs" / "experiment_summary.csv"
 
     backbone_params = sum(param.numel() for param in model.encoder.parameters() if param.requires_grad)
 
     append_experiment_result(
         summary_path,
         {
-            "method": "SimCLR-shared-backbone",
+            "method": "SimCLR-nonprofiling-shared-backbone",
             "run_name": run_name,
             "dataset": "ASCAD.h5",
             "seed": seed,
             "n_train": n_train,
+            "n_finetune": n_finetune,
             "n_attack": n_attack,
             "n_epochs": n_epochs,
             "batch_size": batch_size,
@@ -473,23 +490,32 @@ def main(opts):
             "temperature": temperature,
             "max_shift": max_shift,
             "noise_std": noise_std,
+            "denoise_kernel_size": denoise_kernel_size,
+            "view_augmentation": view_augmentation,
+            "augmentation_family": ",".join(augmentation_family),
+            "augmentation_probability": augmentation_probability,
             "normalize": normalize_mode,
             "window_start": window_start,
             "window_end": window_end,
             "window_size": window_size,
-            "classifier": ("LogisticRegression"),
-            "linear_probe_train_acc": round(train_acc, 6),
+            "classifier": "candidate-key KNeighborsClassifier",
+            "knn_neighbors": knn_neighbors,
+            "knn_weights": knn_weights,
+            "leakage_model": leakage_model,
             "target_byte": target_byte,
             "device": str(device),
             "train_start_time": (train_start_time),
             "train_end_time": (train_end_time),
             "train_time_sec": round(train_time_sec, 2),
             "train_time_ms": round(train_time_ms, 2),
-            "final_rank": final_rank,
-            "min_rank": min_rank,
-            "rank0_trace": rank0_trace,
-            "figure_path": str(rank_path.relative_to(PROJECT_ROOT)),
+            "true_key": true_key,
+            "best_key": best_key,
+            "best_accuracy": round(best_accuracy, 6),
+            "true_key_accuracy": round(true_key_accuracy, 6),
+            "true_key_candidate_rank": true_key_rank,
             "checkpoint_path": str(checkpoint_path.relative_to(PROJECT_ROOT)),
+            "candidate_scores_path": str(candidate_scores_path.relative_to(PROJECT_ROOT)),
+            "ranked_keys_path": str(ranked_keys_path.relative_to(PROJECT_ROOT)),
         },
     )
 
@@ -498,9 +524,40 @@ def main(opts):
 
 def parse_args(argv):
     parser = argparse.ArgumentParser()
-    parser.add_argument('-i', '--input', help='')
+    parser.add_argument("-i", "--input", default=None, help="Path to ASCAD.h5")
+    parser.add_argument("--seed", type=int, default=47)
+    parser.add_argument("--n-train", type=int, default=500)
+    parser.add_argument("--n-finetune", type=int, default=500)
+    parser.add_argument("--n-attack", type=int, default=25)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--encode-batch-size", type=int, default=256)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--backbone-name", default="shared_cnn_v1")
+    parser.add_argument("--pool-mode", default="mean_max")
+    parser.add_argument("--projector-hidden-dim", type=int, default=320)
+    parser.add_argument("--proj-dim", type=int, default=128)
+    parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--max-shift", type=int, default=5)
+    parser.add_argument("--noise-std", type=float, default=0.05)
+    parser.add_argument("--denoise-kernel-size", type=int, default=5)
+    parser.add_argument(
+        "--view-augmentation",
+        choices=("random",) + VALID_AUGMENTATIONS,
+        default="random",
+        help="Transformation policy sampled independently for both SimCLR views.",
+    )
+    parser.add_argument("--augmentations", default="random_shift,denoise,gaussian_noise")
+    parser.add_argument("--augmentation-probability", type=float, default=0.5)
+    parser.add_argument("--window-start", type=int, default=0)
+    parser.add_argument("--window-end", type=int, default=700)
+    parser.add_argument("--target-byte", type=int, default=2)
+    parser.add_argument("--normalize", choices=("divide128", "zscore"), default=None)
+    parser.add_argument("--leakage-model", choices=("ID", "HW"), default="HW")
+    parser.add_argument("--knn-neighbors", type=int, default=3)
+    parser.add_argument("--knn-weights", choices=("uniform", "distance"), default="distance")
     
-    opts = parser.parse_args()
+    opts = parser.parse_args(argv[1:])
     return opts 
 
 

@@ -6,6 +6,7 @@ EXPERIMENT_COLUMNS = [
     "method",
     "dataset",
     "n_train",
+    "n_finetune",
     "n_attack",
     "n_epochs",
     "batch_size",
@@ -16,6 +17,9 @@ EXPERIMENT_COLUMNS = [
     "k_steps",
     "num_t_samples",
     "classifier",
+    "knn_neighbors",
+    "knn_weights",
+    "leakage_model",
     "target_byte",
     "device",
     "train_start_time",
@@ -25,8 +29,15 @@ EXPERIMENT_COLUMNS = [
     "final_rank",
     "min_rank",
     "rank0_trace",
+    "true_key",
+    "best_key",
+    "best_accuracy",
+    "true_key_accuracy",
+    "true_key_candidate_rank",
     "figure_path",
     "checkpoint_path",
+    "candidate_scores_path",
+    "ranked_keys_path",
 ]
 
 

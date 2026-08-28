@@ -120,7 +120,7 @@ class CnnBestNorm(nn.Module):
         """Dimension of each time step in the feature map."""
         return self.output_channels
 
-    def get_output_dim(self) -> int:
+    def get_output_dim(self, pool: Optional[str] = None) -> int:
         """Dimension of the final output vector (embedding or class probs)."""
         return self.emb_size
 
@@ -183,10 +183,11 @@ class CnnBestNorm(nn.Module):
         
 
 class SharedCNN1D(nn.Module):
-    def __init__(self, input_channels: int = 1):
+    def __init__(self, input_channels: int = 1, input_length: int = 700):
         super().__init__()
 
         self.input_channels = input_channels
+        self.input_length = input_length
         self.output_channels = 320
 
         self.net = nn.Sequential(
@@ -252,6 +253,86 @@ class SharedCNN1D(nn.Module):
         h = self.net(x)
 
         return h.transpose(1, 2)
+
+    def _to_channels_first_mask(
+        self,
+        visible_mask: torch.Tensor,
+        trace_length: int,
+    ) -> torch.Tensor:
+        if visible_mask.ndim == 2:
+            visible_mask = visible_mask.unsqueeze(1)
+        elif visible_mask.ndim == 3 and visible_mask.shape[-1] == 1:
+            visible_mask = visible_mask.transpose(1, 2)
+        elif visible_mask.ndim == 3 and visible_mask.shape[1] == 1:
+            visible_mask = visible_mask
+        else:
+            raise ValueError(
+                "Expected visible_mask shape (batch, length), "
+                "(batch, length, 1), or (batch, 1, length); "
+                f"received {tuple(visible_mask.shape)}"
+            )
+
+        if visible_mask.shape[-1] != trace_length:
+            raise ValueError(
+                "visible_mask length must match input trace length: "
+                f"{visible_mask.shape[-1]} != {trace_length}"
+            )
+
+        return visible_mask
+
+    @staticmethod
+    def _resize_visible_mask(
+        visible_mask: torch.Tensor,
+        target_length: int,
+    ) -> torch.Tensor:
+        if visible_mask.shape[-1] == target_length:
+            return visible_mask
+
+        resized = F.interpolate(
+            visible_mask.float(),
+            size=target_length,
+            mode="nearest",
+        )
+
+        return (resized > 0.5).to(dtype=visible_mask.dtype)
+
+    def forward_masked_features(
+        self,
+        x: torch.Tensor,
+        visible_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = self._to_channels_first(x)
+        visible_mask = self._to_channels_first_mask(
+            visible_mask,
+            trace_length=x.shape[-1],
+        ).to(
+            device=x.device,
+            dtype=x.dtype,
+        )
+
+        h = x * visible_mask
+        mask = visible_mask
+
+        for layer in self.net:
+            if isinstance(layer, nn.Conv1d):
+                h = layer(h * mask)
+                mask = self._resize_visible_mask(
+                    mask,
+                    target_length=h.shape[-1],
+                ).to(
+                    dtype=h.dtype,
+                    device=h.device,
+                )
+                h = h * mask
+                continue
+
+            h = layer(h)
+            h = h * mask
+
+        return (
+            h.transpose(1, 2),
+            mask.transpose(1, 2),
+        )
 
     def forward_temporal(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_features(x)
@@ -344,4 +425,4 @@ def build_backbone(model_name: str = "shared_cnn_v1", input_channels: int = 1, i
         return TransformerBest(input_channels=input_channels, input_length=input_length)
     
     else:
-        raise ValueError(f"Unknown backbone: {name}")
+        raise ValueError(f"Unknown backbone: {model_name}")

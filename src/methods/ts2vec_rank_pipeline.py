@@ -6,17 +6,21 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.linear_model import LogisticRegression
 from torch.optim.swa_utils import AveragedModel
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.datasets.ascad_loader import load_ascad_split
-from src.evaluation.rank_eval import (
-    compute_rank_curve,
-    expand_proba_to_256,
-    plot_rank_curve,
+from src.methods.knn_distinguisher import (
+    compute_knn_candidate_accuracies,
+    rank_key_candidates,
+    split_nonprofiling_attack_data,
 )
-from src.models.cnn_zoo import build_cnn_backbone
+from src.models.model_zoo import build_backbone
+from src.utils.key_rank import metadata_true_key
+from src.utils.trace_transforms import (
+    ensure_trace_matrix,
+    prepare_model_input,
+)
 from src.utils.experiment_logger import append_experiment_result
 from src.utils.get_device import get_device
 
@@ -222,15 +226,18 @@ class TS2VecSharedModel(nn.Module):
         self,
         backbone_name: str = "shared_cnn_v1",
         pool_mode: str = "mean_max",
+        input_length: int = 700,
     ):
         super().__init__()
 
         self.backbone_name = backbone_name
         self.pool_mode = pool_mode
+        self.input_length = input_length
 
-        self.encoder = build_cnn_backbone(
-            name=backbone_name,
+        self.encoder = build_backbone(
+            model_name=backbone_name,
             input_channels=1,
+            input_length=input_length,
         )
 
         self.temporal_repr_dim = (
@@ -386,6 +393,7 @@ def random_shared_crop(
 def train_ts2vec(
     X_train,
     device,
+    trace_window,
     backbone_name: str = "shared_cnn_v1",
     pool_mode: str = "mean_max",
     n_epochs: int = 100,
@@ -396,10 +404,14 @@ def train_ts2vec(
     temporal_unit: int = 0,
     minimum_crop_ratio: float = 0.5,
     timestamp_keep_probability: float = 0.5,
+    input_length: int = 700,
 ):
+    X_train = ensure_trace_matrix(X_train)
+
     model = TS2VecSharedModel(
         backbone_name=backbone_name,
         pool_mode=pool_mode,
+        input_length=input_length,
     ).to(device)
 
     averaged_model = AveragedModel(
@@ -453,6 +465,10 @@ def train_ts2vec(
         sample_x = torch.from_numpy(
             X_train[:8]
         ).float().to(device)
+        sample_x = prepare_model_input(
+            sample_x,
+            trace_window=trace_window,
+        )
 
         sample_temporal = (
             model.forward_features(
@@ -503,6 +519,10 @@ def train_ts2vec(
 
         for batch_index, (batch_x,) in enumerate(loader):
             batch_x = batch_x.to(device)
+            batch_x = prepare_model_input(
+                batch_x,
+                trace_window=trace_window,
+            )
 
             cropped_x = random_shared_crop(
                 batch_x,
@@ -611,8 +631,11 @@ def encode_representations(
     model,
     X,
     device,
+    trace_window,
     batch_size: int = 256,
 ):
+    X = ensure_trace_matrix(X)
+
     dataset = TensorDataset(
         torch.from_numpy(X).float()
     )
@@ -630,6 +653,10 @@ def encode_representations(
     with torch.no_grad():
         for (batch_x,) in loader:
             batch_x = batch_x.to(device)
+            batch_x = prepare_model_input(
+                batch_x,
+                trace_window=trace_window,
+            )
 
             representation = model.encode(
                 batch_x
@@ -656,8 +683,9 @@ def main():
 
     seed = 42
 
-    n_train = 50000
-    n_attack = 10000
+    n_train = 500
+    n_finetune = 500
+    n_attack = 25
 
     n_epochs = 100
     batch_size = 64
@@ -675,6 +703,9 @@ def main():
 
     target_byte = 2
     normalize_mode = None
+    knn_neighbors = 3
+    knn_weights = "distance"
+    leakage_model = "HW"
 
     trace_window = (0, 700)
 
@@ -736,45 +767,36 @@ def main():
     )
 
     print(
-        "Loading ASCAD profiling traces..."
-    )
-
-    X_profiling, y_profiling = load_ascad_split(
-        h5_path=ascad_path,
-        split="profiling",
-        add_channel=True,
-        normalize=normalize_mode,
-        load_metadata=False,
-        trace_window=trace_window,
-    )
-
-    print(
         "Loading ASCAD attack traces "
         "with metadata..."
     )
 
     (
         X_attack,
-        y_attack,
+        _,
         metadata_attack,
     ) = load_ascad_split(
         h5_path=ascad_path,
         split="attack",
-        add_channel=True,
+        add_channel=False,
         normalize=normalize_mode,
         load_metadata=True,
-        trace_window=trace_window,
+        trace_window=None,
     )
 
-    X_train = X_profiling[:n_train]
-    y_train = y_profiling[:n_train]
-
-    X_attack_small = (
-        X_attack[:n_attack]
-    )
-
-    metadata_attack_small = (
-        metadata_attack[:n_attack]
+    (
+        X_ssl_train,
+        X_knn_train,
+        metadata_knn_train,
+        X_knn_eval,
+        metadata_knn_eval,
+    ) = split_nonprofiling_attack_data(
+        X_attack=X_attack,
+        metadata_attack=metadata_attack,
+        n_ssl_train=n_train,
+        n_knn_train=n_finetune,
+        n_knn_eval=n_attack,
+        n_neighbors=knn_neighbors,
     )
 
     print(
@@ -788,23 +810,33 @@ def main():
     )
 
     print(
-        "X_train shape:",
-        X_train.shape,
+        "Full trace length:",
+        X_attack.shape[1],
     )
 
     print(
-        "y_train shape:",
-        y_train.shape,
+        "X_ssl_train shape:",
+        X_ssl_train.shape,
     )
 
     print(
-        "X_attack shape:",
-        X_attack_small.shape,
+        "X_knn_train shape:",
+        X_knn_train.shape,
     )
 
     print(
-        "metadata_attack shape:",
-        metadata_attack_small.shape,
+        "metadata_knn_train shape:",
+        metadata_knn_train.shape,
+    )
+
+    print(
+        "X_knn_eval shape:",
+        X_knn_eval.shape,
+    )
+
+    print(
+        "metadata_knn_eval shape:",
+        metadata_knn_eval.shape,
     )
 
     device = get_device(
@@ -823,8 +855,9 @@ def main():
     train_start_time = time.time()
 
     model, loss_log = train_ts2vec(
-        X_train=X_train,
+        X_train=X_ssl_train,
         device=device,
+        trace_window=trace_window,
         backbone_name=backbone_name,
         pool_mode=pool_mode,
         n_epochs=n_epochs,
@@ -839,6 +872,7 @@ def main():
         timestamp_keep_probability=(
             timestamp_keep_probability
         ),
+        input_length=window_size,
     )
 
     train_end_time = time.time()
@@ -894,187 +928,124 @@ def main():
     )
 
     print(
-        "Encoding profiling representations..."
+        "Encoding KNN-train representations..."
     )
 
-    repr_train = encode_representations(
+    repr_knn_train = encode_representations(
         model=model,
-        X=X_train,
+        X=X_knn_train,
         device=device,
+        trace_window=trace_window,
         batch_size=256,
     )
 
     print(
-        "Encoding attack representations..."
+        "Encoding KNN-eval representations..."
     )
 
-    repr_attack = encode_representations(
+    repr_knn_eval = encode_representations(
         model=model,
-        X=X_attack_small,
+        X=X_knn_eval,
         device=device,
+        trace_window=trace_window,
         batch_size=256,
     )
 
     print(
-        "repr_train shape:",
-        repr_train.shape,
+        "repr_knn_train shape:",
+        repr_knn_train.shape,
     )
 
     print(
-        "repr_attack shape:",
-        repr_attack.shape,
+        "repr_knn_eval shape:",
+        repr_knn_eval.shape,
     )
 
     expected_repr_dim = (
         model.pooled_repr_dim
     )
 
-    if repr_train.shape[1] != expected_repr_dim:
+    if repr_knn_train.shape[1] != expected_repr_dim:
         raise ValueError(
             "Unexpected representation dimension: "
             f"expected {expected_repr_dim}, "
-            f"received {repr_train.shape[1]}"
+            f"received {repr_knn_train.shape[1]}"
         )
 
     np.save(
-        representation_dir / "repr_train.npy",
-        repr_train,
+        representation_dir / "repr_knn_train.npy",
+        repr_knn_train,
     )
 
     np.save(
-        representation_dir / "repr_attack.npy",
-        repr_attack,
-    )
-
-    np.save(
-        representation_dir / "y_train.npy",
-        y_train,
+        representation_dir / "repr_knn_eval.npy",
+        repr_knn_eval,
     )
 
     print(
-        "Training linear classifier "
-        "on TS2Vec shared-backbone representations..."
+        "Training 256 candidate KNNs "
+        "and computing candidate accuracies..."
     )
 
-    classifier = LogisticRegression(
-        max_iter=2000,
-        solver="lbfgs",
-    )
-
-    classifier.fit(
-        repr_train,
-        y_train,
-    )
-
-    train_accuracy = float(
-        classifier.score(
-            repr_train,
-            y_train,
-        )
-    )
-
-    print(
-        "Linear probe train accuracy:",
-        train_accuracy,
-    )
-
-    print(
-        "Predicting attack probabilities..."
-    )
-
-    attack_probabilities_seen = (
-        classifier.predict_proba(
-            repr_attack
-        )
-    )
-
-    attack_probabilities = expand_proba_to_256(
-        attack_probabilities_seen,
-        classes=classifier.classes_,
-    )
-
-    print(
-        "attack_probas shape:",
-        attack_probabilities.shape,
-    )
-
-    print(
-        "Computing key rank curve..."
-    )
-
-    ranks = compute_rank_curve(
-        probas=attack_probabilities,
-        metadata=metadata_attack_small,
+    candidate_accuracies = compute_knn_candidate_accuracies(
+        repr_train=repr_knn_train,
+        metadata_train=metadata_knn_train,
+        repr_eval=repr_knn_eval,
+        metadata_eval=metadata_knn_eval,
         target_byte=target_byte,
-        max_traces=n_attack,
-        use_log=True,
+        n_neighbors=knn_neighbors,
+        leakage_model=leakage_model,
+        weights=knn_weights,
     )
 
-    final_rank = int(
-        ranks[-1]
+    true_key = metadata_true_key(
+        metadata_knn_eval,
+        target_byte=target_byte,
     )
 
-    minimum_rank = int(
-        ranks.min()
+    ranked_keys, true_key_rank = rank_key_candidates(
+        candidate_scores=candidate_accuracies,
+        true_key=true_key,
     )
 
-    rank_zero_indices = np.where(
-        ranks == 0
-    )[0]
+    best_key = int(ranked_keys[0])
+    best_accuracy = float(candidate_accuracies[best_key])
+    true_key_accuracy = float(candidate_accuracies[true_key])
 
-    rank_zero_trace = (
-        int(rank_zero_indices[0] + 1)
-        if len(rank_zero_indices) > 0
-        else -1
-    )
+    print("True key:", true_key)
+    print("Best key:", best_key)
+    print("Best candidate accuracy:", best_accuracy)
+    print("True-key candidate accuracy:", true_key_accuracy)
+    print("True-key rank among candidate KNNs:", true_key_rank)
 
-    print(
-        "Final rank:",
-        final_rank,
-    )
-
-    print(
-        "Minimum rank:",
-        minimum_rank,
-    )
-
-    print(
-        "Rank-0 trace:",
-        rank_zero_trace,
-    )
-
-    rank_path = (
-        figure_dir
-        / f"{run_name}_linear_probe_rank.png"
-    )
-
-    ranks_path = (
+    candidate_scores_path = (
         representation_dir
-        / f"{run_name}_linear_probe_ranks.npy"
+        / f"{run_name}_candidate_accuracies.npy"
     )
 
-    plot_rank_curve(
-        ranks,
-        save_path=rank_path,
-        title=(
-            "TS2Vec Restored Shared CNN "
-            "+ Linear Probe Key Rank"
-        ),
+    ranked_keys_path = (
+        representation_dir
+        / f"{run_name}_ranked_keys.npy"
     )
 
     np.save(
-        ranks_path,
-        ranks,
+        candidate_scores_path,
+        candidate_accuracies,
+    )
+
+    np.save(
+        ranked_keys_path,
+        ranked_keys,
     )
 
     print(
-        "Saved rank curve to:",
-        rank_path,
+        "Saved candidate accuracies to:",
+        candidate_scores_path,
     )
 
     print(
-        "Saved ranks to:",
-        ranks_path,
+        "Saved ranked keys to:",
+        ranked_keys_path,
     )
 
     summary_path = (
@@ -1102,12 +1073,13 @@ def main():
         summary_path,
         {
             "method": (
-                "TS2Vec-restored-shared-backbone"
+                "TS2Vec-nonprofiling-shared-backbone"
             ),
             "run_name": run_name,
             "dataset": "ASCAD.h5",
             "seed": seed,
             "n_train": n_train,
+            "n_finetune": n_finetune,
             "n_attack": n_attack,
             "n_epochs": n_epochs,
             "batch_size": batch_size,
@@ -1143,13 +1115,10 @@ def main():
             "window_start": window_start,
             "window_end": window_end,
             "window_size": window_size,
-            "classifier": (
-                "LogisticRegression"
-            ),
-            "linear_probe_train_acc": round(
-                train_accuracy,
-                6,
-            ),
+            "classifier": "candidate-key KNeighborsClassifier",
+            "knn_neighbors": knn_neighbors,
+            "knn_weights": knn_weights,
+            "leakage_model": leakage_model,
             "target_byte": target_byte,
             "device": str(device),
             "final_ts2vec_loss": round(
@@ -1170,16 +1139,23 @@ def main():
                 train_time_ms,
                 2,
             ),
-            "final_rank": final_rank,
-            "min_rank": minimum_rank,
-            "rank0_trace": rank_zero_trace,
-            "figure_path": str(
-                rank_path.relative_to(
+            "true_key": true_key,
+            "best_key": best_key,
+            "best_accuracy": round(best_accuracy, 6),
+            "true_key_accuracy": round(true_key_accuracy, 6),
+            "true_key_candidate_rank": true_key_rank,
+            "checkpoint_path": str(
+                checkpoint_path.relative_to(
                     PROJECT_ROOT
                 )
             ),
-            "checkpoint_path": str(
-                checkpoint_path.relative_to(
+            "candidate_scores_path": str(
+                candidate_scores_path.relative_to(
+                    PROJECT_ROOT
+                )
+            ),
+            "ranked_keys_path": str(
+                ranked_keys_path.relative_to(
                     PROJECT_ROOT
                 )
             ),
