@@ -2,8 +2,15 @@ import os
 import random
 import numpy as np
 from collections import defaultdict
-import matplotlib.pyplot as plt
-from tqdm import tqdm
+
+
+def progress(iterable, desc=None):
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        return iterable
+
+    return tqdm(iterable, desc=desc)
 
 
 Sbox = [99, 124, 119, 123, 242, 107, 111, 197, 48, 1, 103, 43, 254, 215, 171, 118, 202, 130, 201, 125, 250, 89, 71,
@@ -109,7 +116,7 @@ def key_rank_from_log_scores(log_scores, true_key, max_traces=None):
     cumulative_scores = np.zeros(256, dtype=np.float64)
     ranks = np.zeros(num_traces, dtype=np.int64)
 
-    for trace_index in tqdm(range(num_traces), desc="Computing key rank"):
+    for trace_index in progress(range(num_traces), desc="Computing key rank"):
         cumulative_scores += log_scores[trace_index]
         ranks[trace_index] = int(np.sum(cumulative_scores > cumulative_scores[true_key]))
 
@@ -174,6 +181,8 @@ def compute_rank_curve(probas, metadata, target_byte=2, max_traces=None, leakage
 
 
 def plot_rank_curve(ranks, save_path, title="Key Rank Curve"):
+    import matplotlib.pyplot as plt
+
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
     plt.figure()
@@ -188,6 +197,8 @@ def plot_rank_curve(ranks, save_path, title="Key Rank Curve"):
 
 
 def ranking_curve(preds, key, plaintext, target_byte, rank_root, leakage_model='HW', trace_num_max=500):
+    import matplotlib.pyplot as plt
+
     """
     - preds : the probability for each class (n*256 for a byte, n*9 for Hamming weight)
     - real_key : the key of the target device
@@ -206,7 +217,7 @@ def ranking_curve(preds, key, plaintext, target_byte, rank_root, leakage_model='
     plaintext = plaintext[:, target_byte]
 
     # attack multiples times for average
-    for time in tqdm(range(num_averaged)):
+    for time in progress(range(num_averaged)):
         # select the attack traces randomly
         random_index = list(range(plaintext.shape[0]))
 

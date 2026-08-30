@@ -1,15 +1,145 @@
 import torch
 import torch.nn as nn
+from typing import Optional
 
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Optional, Tuple, Union
+class TraceTransformer1D(nn.Module):
+    """Patch-based Transformer encoder for one-dimensional power traces."""
 
+    def __init__(
+        self,
+        input_channels: int = 1,
+        input_length: int = 700,
+        patch_size: int = 10,
+        embed_dim: int = 192,
+        depth: int = 4,
+        num_heads: int = 6,
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
 
-class TransformerBest():
-    pass
+        if patch_size <= 0:
+            raise ValueError("patch_size must be greater than zero")
+        if embed_dim % num_heads != 0:
+            raise ValueError("embed_dim must be divisible by num_heads")
+
+        self.input_channels = input_channels
+        self.input_length = input_length
+        self.patch_size = patch_size
+        self.output_channels = embed_dim
+        self.patch_dim = input_channels * patch_size
+        self.num_patches = (input_length + patch_size - 1) // patch_size
+
+        self.patch_projection = nn.Linear(self.patch_dim, embed_dim)
+        self.position_embedding = nn.Parameter(
+            torch.zeros(1, self.num_patches, embed_dim)
+        )
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=int(embed_dim * mlp_ratio),
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=depth,
+        )
+        self.norm = nn.LayerNorm(embed_dim)
+
+        nn.init.trunc_normal_(self.position_embedding, std=0.02)
+        nn.init.xavier_uniform_(self.patch_projection.weight)
+        nn.init.zeros_(self.patch_projection.bias)
+
+    def _to_channels_last(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(f"Expected 3D input, got {tuple(x.shape)}")
+        if x.shape[-1] == self.input_channels:
+            return x
+        if x.shape[1] == self.input_channels:
+            return x.transpose(1, 2)
+        raise ValueError(f"Unexpected input shape: {tuple(x.shape)}")
+
+    def patchify(self, x: torch.Tensor) -> torch.Tensor:
+        x = self._to_channels_last(x)
+        batch_size, trace_length, channels = x.shape
+        padded_length = (
+            (trace_length + self.patch_size - 1) // self.patch_size
+        ) * self.patch_size
+
+        if padded_length != trace_length:
+            padding = x.new_zeros(
+                batch_size,
+                padded_length - trace_length,
+                channels,
+            )
+            x = torch.cat([x, padding], dim=1)
+
+        return x.reshape(
+            batch_size,
+            padded_length // self.patch_size,
+            self.patch_dim,
+        )
+
+    def position_tokens(self, number_of_patches: int) -> torch.Tensor:
+        if number_of_patches > self.num_patches:
+            raise ValueError(
+                "Trace produces more patches than configured: "
+                f"{number_of_patches} > {self.num_patches}"
+            )
+        return self.position_embedding[:, :number_of_patches]
+
+    def embed_patch_values(self, patch_values: torch.Tensor) -> torch.Tensor:
+        return self.patch_projection(patch_values)
+
+    def encode_token_embeddings(self, tokens: torch.Tensor) -> torch.Tensor:
+        return self.norm(self.encoder(tokens))
+
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        patch_values = self.patchify(x)
+        tokens = self.embed_patch_values(patch_values)
+        tokens = tokens + self.position_tokens(tokens.shape[1])
+        return self.encode_token_embeddings(tokens)
+
+    def forward_temporal(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_features(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_features(x)
+
+    def encode(self, x: torch.Tensor, pool: str = "mean") -> torch.Tensor:
+        features = self.forward_features(x)
+
+        if pool == "mean":
+            return features.mean(dim=1)
+        if pool == "max":
+            return features.max(dim=1).values
+        if pool == "mean_max":
+            return torch.cat(
+                [features.mean(dim=1), features.max(dim=1).values],
+                dim=1,
+            )
+        if pool in ("none", None):
+            return features
+        raise ValueError(f"Unsupported pooling mode: {pool}")
+
+    def get_output_dim(self, pool: str = "mean") -> int:
+        if pool in ("mean", "max"):
+            return self.output_channels
+        if pool == "mean_max":
+            return self.output_channels * 2
+        if pool in ("none", None):
+            raise ValueError(
+                "Temporal output does not have one fixed vector dimension."
+            )
+        raise ValueError(f"Unsupported pooling mode: {pool}")
+
+    def get_temporal_output_dim(self) -> int:
+        return self.output_channels
 
 
 class CnnBestNorm(nn.Module):
@@ -254,86 +384,6 @@ class SharedCNN1D(nn.Module):
 
         return h.transpose(1, 2)
 
-    def _to_channels_first_mask(
-        self,
-        visible_mask: torch.Tensor,
-        trace_length: int,
-    ) -> torch.Tensor:
-        if visible_mask.ndim == 2:
-            visible_mask = visible_mask.unsqueeze(1)
-        elif visible_mask.ndim == 3 and visible_mask.shape[-1] == 1:
-            visible_mask = visible_mask.transpose(1, 2)
-        elif visible_mask.ndim == 3 and visible_mask.shape[1] == 1:
-            visible_mask = visible_mask
-        else:
-            raise ValueError(
-                "Expected visible_mask shape (batch, length), "
-                "(batch, length, 1), or (batch, 1, length); "
-                f"received {tuple(visible_mask.shape)}"
-            )
-
-        if visible_mask.shape[-1] != trace_length:
-            raise ValueError(
-                "visible_mask length must match input trace length: "
-                f"{visible_mask.shape[-1]} != {trace_length}"
-            )
-
-        return visible_mask
-
-    @staticmethod
-    def _resize_visible_mask(
-        visible_mask: torch.Tensor,
-        target_length: int,
-    ) -> torch.Tensor:
-        if visible_mask.shape[-1] == target_length:
-            return visible_mask
-
-        resized = F.interpolate(
-            visible_mask.float(),
-            size=target_length,
-            mode="nearest",
-        )
-
-        return (resized > 0.5).to(dtype=visible_mask.dtype)
-
-    def forward_masked_features(
-        self,
-        x: torch.Tensor,
-        visible_mask: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = self._to_channels_first(x)
-        visible_mask = self._to_channels_first_mask(
-            visible_mask,
-            trace_length=x.shape[-1],
-        ).to(
-            device=x.device,
-            dtype=x.dtype,
-        )
-
-        h = x * visible_mask
-        mask = visible_mask
-
-        for layer in self.net:
-            if isinstance(layer, nn.Conv1d):
-                h = layer(h * mask)
-                mask = self._resize_visible_mask(
-                    mask,
-                    target_length=h.shape[-1],
-                ).to(
-                    dtype=h.dtype,
-                    device=h.device,
-                )
-                h = h * mask
-                continue
-
-            h = layer(h)
-            h = h * mask
-
-        return (
-            h.transpose(1, 2),
-            mask.transpose(1, 2),
-        )
-
     def forward_temporal(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_features(x)
 
@@ -403,8 +453,16 @@ def build_cnn_best_norm_backbone(input_channels: int = 1, input_length: int = 14
     return CnnBestNorm(input_channels=input_channels, input_length=input_length) 
 
 
-def build_transformer_backbone(input_channels: int=1, input_length: int = 1400):
-    pass
+def build_transformer_backbone(
+    input_channels: int = 1,
+    input_length: int = 700,
+    **kwargs,
+) -> TraceTransformer1D:
+    return TraceTransformer1D(
+        input_channels=input_channels,
+        input_length=input_length,
+        **kwargs,
+    )
 
 def build_backbone(model_name: str = "shared_cnn_v1", input_channels: int = 1, input_length: int = 700, **kwargs):
     """
@@ -421,8 +479,12 @@ def build_backbone(model_name: str = "shared_cnn_v1", input_channels: int = 1, i
     elif model_name == "cnn_best_norm":
         return CnnBestNorm(input_channels=input_channels, input_length=input_length) 
     
-    elif model_name == "transformer_sca_best":
-        return TransformerBest(input_channels=input_channels, input_length=input_length)
+    elif model_name == "trace_transformer_v1":
+        return build_transformer_backbone(
+            input_channels=input_channels,
+            input_length=input_length,
+            **kwargs,
+        )
     
     else:
         raise ValueError(f"Unknown backbone: {model_name}")

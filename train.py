@@ -7,8 +7,12 @@ import numpy as np
 import torch
 
 from src.datasets.ascad_loader import load_ascad_split
-from src.methods.ssl_factory import SSL_METHODS, train_ssl_model
 from src.utils.cli_parsers import parse_range
+from src.utils.experiment_config import (
+    SSL_METHODS,
+    build_method_options,
+    get_method_metadata,
+)
 from src.utils.get_device import get_device
 from src.utils.trace_transforms import parse_augmentation_family
 
@@ -35,49 +39,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split", choices=("attack", "profiling"), default="attack")
     parser.add_argument("--trace-window", type=parse_range, default=(0, 700))
     parser.add_argument("--n-train", type=int, default=500)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--normalize", choices=("divide128", "zscore"), default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--output-dir",
         default=str(PROJECT_ROOT / "outputs" / "checkpoints"),
     )
-
-    parser.add_argument("--backbone-name", default="shared_cnn_v1")
-    parser.add_argument("--pool-mode", default="mean_max")
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-
-    parser.add_argument(
-        "--augmentations",
-        default="random_shift,denoise,gaussian_noise",
-        help="Comma-separated view choices used when --view-augmentation=random.",
-    )
-    parser.add_argument(
-        "--view-augmentation",
-        default="random",
-        help="random or one explicit augmentation name.",
-    )
-    parser.add_argument("--augmentation-probability", type=float, default=0.5)
-    parser.add_argument("--max-shift", type=int, default=5)
-    parser.add_argument("--noise-std", type=float, default=0.05)
-    parser.add_argument("--denoise-kernel-size", type=int, default=5)
-
-    parser.add_argument("--projector-hidden-dim", type=int, default=320)
-    parser.add_argument("--proj-dim", type=int, default=128)
-    parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--hidden-dim", type=int, default=512)
-    parser.add_argument("--ema-decay", type=float, default=0.996)
-    parser.add_argument("--context-dim", type=int, default=320)
-    parser.add_argument("--prediction-steps", type=int, default=6)
-    parser.add_argument("--negative-samples", type=int, default=10)
-    parser.add_argument("--patch-size", type=int, default=5)
-    parser.add_argument("--mask-ratio", type=float, default=0.30)
-    parser.add_argument("--alpha", type=float, default=0.5)
-    parser.add_argument("--temporal-unit", type=int, default=0)
-    parser.add_argument("--minimum-crop-ratio", type=float, default=0.5)
-    parser.add_argument("--timestamp-keep-probability", type=float, default=0.5)
 
     return parser
 
@@ -101,6 +71,7 @@ def save_training_artifacts(opts, model, train_result, input_length: int) -> Pat
     torch.save(
         {
             "method": opts.method,
+            "method_metadata": get_method_metadata(opts.method),
             "model_state_dict": model.state_dict(),
             "input_length": input_length,
             "trace_window": tuple(opts.trace_window),
@@ -112,16 +83,23 @@ def save_training_artifacts(opts, model, train_result, input_length: int) -> Pat
     if len(train_result) > 1 and train_result[1] is not None:
         np.save(output_dir / f"{run_name}_loss.npy", np.asarray(train_result[1]))
 
-    if opts.method == "cpc" and len(train_result) > 2 and train_result[2] is not None:
-        np.save(output_dir / f"{run_name}_accuracy.npy", np.asarray(train_result[2]))
-
     with (output_dir / f"{run_name}_config.json").open("w", encoding="utf-8") as handle:
-        json.dump(vars(opts), handle, indent=2, default=str)
+        json.dump(
+            {
+                "args": vars(opts),
+                "method_metadata": get_method_metadata(opts.method),
+            },
+            handle,
+            indent=2,
+            default=str,
+        )
 
     return checkpoint_path
 
 
 def main(opts) -> None:
+    from src.methods.ssl_factory import train_ssl_model
+
     set_seed(opts.seed)
 
     window_start, window_end = opts.trace_window
@@ -161,4 +139,10 @@ def main(opts) -> None:
 
 
 if __name__ == "__main__":
-    main(build_parser().parse_args())
+    cli_opts = build_parser().parse_args()
+    main(
+        build_method_options(
+            method=cli_opts.method,
+            overrides=vars(cli_opts),
+        )
+    )

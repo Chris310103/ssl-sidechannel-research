@@ -8,13 +8,13 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.datasets.ascad_loader import load_ascad_split
-from src.methods.knn_distinguisher import (
-    compute_knn_candidate_accuracies,
-    rank_key_candidates,
-    split_nonprofiling_attack_data,
-)
-from src.methods.ssl_factory import SSL_METHODS, build_ssl_model
 from src.utils.cli_parsers import parse_count_pair, parse_range
+from src.utils.experiment_config import (
+    DEFAULT_METHOD_OPTIONS,
+    SSL_METHODS,
+    build_method_options,
+    get_method_metadata,
+)
 from src.utils.get_device import get_device
 from src.utils.key_rank import metadata_true_key
 from src.utils.trace_transforms import ensure_trace_matrix, prepare_model_input
@@ -37,10 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="Evaluate one SSL encoder with 256 non-profiling KNN distinguishers."
     )
 
-    parser.add_argument("--method", choices=SSL_METHODS, required=True)
+    parser.add_argument("--method", choices=SSL_METHODS, default=None)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--input", default=str(DEFAULT_ASCAD_PATH))
-    parser.add_argument("--trace-window", type=parse_range, default=(0, 700))
+    parser.add_argument("--trace-window", type=parse_range, default=None)
     parser.add_argument(
         "--nv",
         type=parse_count_pair,
@@ -51,40 +51,37 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--target-byte", type=int, default=2)
     parser.add_argument("--leakage-model", choices=("ID", "HW"), default="HW")
-    parser.add_argument("--knn-neighbors", type=int, default=3)
-    parser.add_argument("--knn-weights", choices=("uniform", "distance"), default="distance")
-    parser.add_argument("--encode-batch-size", type=int, default=256)
     parser.add_argument(
         "--output-dir",
         default=str(PROJECT_ROOT / "outputs" / "nonprofiling_attacks"),
     )
 
-    parser.add_argument("--backbone-name", default="shared_cnn_v1")
-    parser.add_argument("--pool-mode", default="mean_max")
-    parser.add_argument("--projector-hidden-dim", type=int, default=320)
-    parser.add_argument("--proj-dim", type=int, default=128)
-    parser.add_argument("--hidden-dim", type=int, default=512)
-    parser.add_argument("--ema-decay", type=float, default=0.996)
-    parser.add_argument("--context-dim", type=int, default=320)
-    parser.add_argument("--prediction-steps", type=int, default=6)
-    parser.add_argument("--patch-size", type=int, default=5)
-    parser.add_argument("--mask-ratio", type=float, default=0.30)
-
     return parser
 
 
-def load_checkpoint(model, checkpoint_path: str, device: str) -> dict:
+def load_checkpoint_payload(checkpoint_path: str, device: str):
     payload = torch.load(checkpoint_path, map_location=device)
 
     if isinstance(payload, dict) and "model_state_dict" in payload:
-        state_dict = payload["model_state_dict"]
-        metadata = payload
-    else:
-        state_dict = payload
-        metadata = {}
+        return payload["model_state_dict"], payload
 
+    return payload, {}
+
+
+def resolve_method(cli_method, checkpoint_metadata) -> str:
+    method = cli_method or checkpoint_metadata.get("method")
+
+    if method is None:
+        raise ValueError(
+            "--method is required when the checkpoint does not include "
+            "training metadata."
+        )
+
+    return method
+
+
+def load_checkpoint(model, state_dict) -> None:
     model.load_state_dict(state_dict)
-    return metadata
 
 
 def encode_representations(
@@ -149,6 +146,7 @@ def save_attack_artifacts(
 
     summary = {
         "method": opts.method,
+        "method_metadata": get_method_metadata(opts.method),
         "checkpoint": opts.checkpoint,
         "checkpoint_metadata": {
             key: value
@@ -182,7 +180,31 @@ def save_attack_artifacts(
 
 
 def main(opts) -> None:
+    from src.methods.knn_distinguisher import (
+        compute_knn_candidate_accuracies,
+        rank_key_candidates,
+        split_nonprofiling_attack_data,
+    )
+    from src.methods.ssl_factory import build_ssl_model
+
     set_seed(opts.seed)
+
+    opts.knn_neighbors = DEFAULT_METHOD_OPTIONS["knn_neighbors"]
+    opts.knn_weights = DEFAULT_METHOD_OPTIONS["knn_weights"]
+    opts.encode_batch_size = DEFAULT_METHOD_OPTIONS["encode_batch_size"]
+
+    device = get_device(prefer_mps=False)
+    state_dict, checkpoint_metadata = load_checkpoint_payload(
+        checkpoint_path=opts.checkpoint,
+        device=device,
+    )
+    method = resolve_method(
+        cli_method=opts.method,
+        checkpoint_metadata=checkpoint_metadata,
+    )
+    opts.trace_window = opts.trace_window or tuple(
+        checkpoint_metadata.get("trace_window", (0, 700))
+    )
 
     window_start, window_end = opts.trace_window
     input_length = window_end - window_start
@@ -208,12 +230,20 @@ def main(opts) -> None:
         )
     )
 
-    device = get_device(prefer_mps=False)
-    model = build_ssl_model(opts, input_length=input_length).to(device)
-    checkpoint_metadata = load_checkpoint(
+    saved_args = checkpoint_metadata.get("args", {})
+    model_opts = build_method_options(
+        method=method,
+        overrides=saved_args,
+    )
+    opts.method = method
+
+    model = build_ssl_model(
+        model_opts,
+        input_length=input_length,
+    ).to(device)
+    load_checkpoint(
         model=model,
-        checkpoint_path=opts.checkpoint,
-        device=device,
+        state_dict=state_dict,
     )
 
     repr_train = encode_representations(

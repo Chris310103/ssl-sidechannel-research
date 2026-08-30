@@ -48,8 +48,11 @@ class SimCLRModel(nn.Module):
         self.backbone_name = backbone_name
         self.pool_mode = pool_mode
 
-        # 3 choices of backbone model: shared_cnn_v1, cnn_best_norm, transformer_sca_best 
-        self.encoder = build_backbone(model_name = backbone_name, input_channels=1, input_length=input_length)
+        self.encoder = build_backbone(
+            model_name=backbone_name,
+            input_channels=1,
+            input_length=input_length,
+        )
 
         self.repr_dim = self.encoder.get_output_dim(pool=pool_mode)
 

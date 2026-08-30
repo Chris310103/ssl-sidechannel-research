@@ -1,10 +1,9 @@
 import numpy as np
-from sklearn.neighbors import KNeighborsClassifier
-from tqdm import tqdm
 
 from src.utils.key_rank import (
     leakage_labels,
     metadata_plaintext,
+    progress,
 )
 
 
@@ -54,6 +53,8 @@ def compute_knn_candidate_accuracies(
     leakage_model: str = "HW",
     weights: str = "distance",
 ):
+    from sklearn.neighbors import KNeighborsClassifier
+
     plaintext_train = metadata_plaintext(
         metadata_train,
         target_byte=target_byte,
@@ -65,7 +66,7 @@ def compute_knn_candidate_accuracies(
 
     accuracies = np.zeros(256, dtype=np.float64)
 
-    for key_guess in tqdm(range(256), desc="Training candidate KNNs"):
+    for key_guess in progress(range(256), desc="Training candidate KNNs"):
         y_train = leakage_labels(
             plaintext_train,
             key_guess=key_guess,
