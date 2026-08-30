@@ -14,7 +14,7 @@ def check_file_exists(file_path):
     return
 
 
-def load_ascad(ascad_database_file, output_file, attack_window, load_metadata=False):
+def load_ascad(ascad_database_file, output_file, load_metadata=False):
     check_file_exists(ascad_database_file)
 
     # Open the ASCAD database HDF5 for reading
@@ -44,7 +44,6 @@ def load_ascad(ascad_database_file, output_file, attack_window, load_metadata=Fa
             Y_profiling=Y_profiling,
             X_attack=X_attack,
             Y_attack=Y_attack,
-            attack_window=attack_window
         )
 
         print("Successfully converted ASCAD database to .npz format and saved to '%s'." % output_file)
@@ -57,7 +56,6 @@ def load_ascad(ascad_database_file, output_file, attack_window, load_metadata=Fa
             Y_profiling=Y_profiling,
             X_attack=X_attack,
             Y_attack=Y_attack,
-            attack_window=attack_window,
             profiling_metadata=profile_metadata,
             attack_metadata=attack_metadata,
         )
@@ -69,17 +67,13 @@ def main(opts):
     input_file = opts.input
     output_dir = opts.output
 
-    attack_window_str = opts.attack_window
-    attack_window_num = attack_window_str.split("_")
-    attack_window = (int(attack_window_num[0]), int(attack_window_num[1]))
-
     if opts.load_metadata:
         print("Loading metadata from the ASCAD database...")
         output_file = os.path.join(output_dir, "ascad_data_with_metadata.npz")
     else:
         output_file = os.path.join(output_dir, "ascad_data.npz")
 
-    load_ascad(input_file, output_file, attack_window=attack_window, load_metadata=opts.load_metadata)
+    load_ascad(input_file, output_file, load_metadata=opts.load_metadata)
 
 
 def parse_opts(argv):
@@ -87,7 +81,6 @@ def parse_opts(argv):
     parser.add_argument('-i', '--input', help='')
     parser.add_argument('-o', '--output', help='')
     parser.add_argument('--load_metadata', action='store_true', help='Load metadata from the ASCAD database')
-    parser.add_argument('--attack_window', default='0_100', help='Attack window boundaries (start_end)')
     opts = parser.parse_args(argv)
     return opts
 
