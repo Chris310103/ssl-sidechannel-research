@@ -108,61 +108,98 @@ def load_ascad_split(
 
     return X, y
 
-def load_ascad_all(
-    h5_path: Union[str, Path],
-    add_channel: bool = True,
-    normalize: Optional[Literal["divide128", "zscore"]] = None,
-    load_metadata: bool = False,
-) -> Dict[str, Any]:
-    
-    if load_metadata:
-        X_profiling, y_profiling, metadata_profiling = load_ascad_split(
-            h5_path=h5_path,
-            split="profiling",
-            add_channel=add_channel,
-            normalize=normalize,
-            load_metadata=True,
-        )
 
-        X_attack, y_attack, metadata_attack = load_ascad_split(
-            h5_path=h5_path,
-            split="attack",
-            add_channel=add_channel,
-            normalize=normalize,
+def load_from_hdf5(
+    h5_path: Union[str, Path],
+    db_name: str = "ascad",
+) -> Dict[str, Any]:
+    h5_path = Path(h5_path)
+
+    if not h5_path.exists():
+        raise FileNotFoundError(f"HDF5 file not found: {h5_path}")
+
+    if db_name.lower() == "ascad":
+        profiling_split = load_ascad_split(
+            h5_path,
+            split="profiling",
+            add_channel=True,
+            normalize=None,
             load_metadata=True,
+            trace_window=None,
+        )
+        attack_split = load_ascad_split(
+            h5_path,
+            split="attack",
+            add_channel=True,
+            normalize=None,
+            load_metadata=True,
+            trace_window=None,
         )
 
         return {
-            "X_profiling": X_profiling,
-            "y_profiling": y_profiling,
-            "metadata_profiling": metadata_profiling,
-            "X_attack": X_attack,
-            "y_attack": y_attack,
-            "metadata_attack": metadata_attack,
+            "profiling": {
+                "X": profiling_split[0],
+                "y": profiling_split[1],
+                "metadata": profiling_split[2],
+            },
+            "attack": {
+                "X": attack_split[0],
+                "y": attack_split[1],
+                "metadata": attack_split[2],
+            },
         }
 
-    X_profiling, y_profiling = load_ascad_split(
-        h5_path=h5_path,
-        split="profiling",
-        add_channel=add_channel,
-        normalize=normalize,
-        load_metadata=False,
-    )
+    else:
+        raise ValueError(f"Unsupported database name: {db_name}. Use 'ascad'.")
 
-    X_attack, y_attack = load_ascad_split(
-        h5_path=h5_path,
-        split="attack",
-        add_channel=add_channel,
-        normalize=normalize,
-        load_metadata=False,
-    )
+def load_from_npz(
+    npz_path: Union[str, Path],
+    db_name: str = "ascad",
+) -> Dict[str, Any]:
+    npz_path = Path(npz_path)
 
-    return {
-        "X_profiling": X_profiling,
-        "y_profiling": y_profiling,
-        "X_attack": X_attack,
-        "y_attack": y_attack,
-    }
+    if not npz_path.exists():
+        raise FileNotFoundError(f"NPZ file not found: {npz_path}")
+
+    if db_name.lower() == "ascad":
+        with np.load(npz_path, allow_pickle=True) as data:
+            return {
+                "profiling": {
+                    "X": data["X_profiling"],
+                    "y": data["Y_profiling"],
+                    "metadata": data.get("profiling_metadata", None),
+                },
+                "attack": {
+                    "X": data["X_attack"],
+                    "y": data["Y_attack"],
+                    "metadata": data.get("attack_metadata", None),
+                },
+            }
+    else:
+        raise ValueError(f"Unsupported database name: {db_name}. Use 'ascad'.")
+
+
+def load_dataset(inp_path: Union[str, Path], data_source: str = "hdf5", db_name: str = "ascad") -> Dict[str, Any]:
+    """
+        So, this function is loading the dataset based on the data source and database name.
+        It currently supports loading the ASCAD dataset or DF dataset from an HDF5 file, or npz file.
+        It returns a dictionary containing the profiling and attack traces, labels, and optionally metadata.
+    """
+    # first, we check if the input path exists
+    inp_path = Path(inp_path)
+    if not inp_path.exists():
+        raise FileNotFoundError(f"Input path not found: {inp_path}")
+
+    # second, we load the dataset based on the data source
+    if data_source == "hdf5":
+        data_dict = load_from_hdf5(inp_path, db_name)
+    elif data_source == "npz":
+        data_dict = load_from_npz(inp_path, db_name)
+    else:
+        raise ValueError(f"Unsupported data source: {data_source}. Use 'hdf5' or 'npz'.")
+
+    # third, return the data dictionary
+    return data_dict
 
 
 if __name__ == "__main__":

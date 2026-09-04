@@ -1,3 +1,5 @@
+import os
+import sys
 import argparse
 import json
 import random
@@ -6,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.datasets.ascad_loader import load_ascad_split
+from src.datasets.data_loader import load_dataset
 from src.utils.cli_parsers import parse_range
 from src.utils.experiment_config import (
     SSL_METHODS,
