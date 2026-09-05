@@ -17,13 +17,15 @@ from src.utils.experiment_config import (
 )
 from src.utils.get_device import get_device
 from src.utils.trace_transforms import parse_augmentation_family
+from src.methods.ssl_factory import train_ssl_model
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_ASCAD_PATH = PROJECT_ROOT / "data" / "raw" / "ascad" / "ASCAD.h5"
+DEFAULT_ASCAD_PATH = os.path.join(PROJECT_ROOT, "data", "npz_data", "ASCAD", "ATM_AES_v1_fixed_key", "ASCAD.npz")
 
 
-def set_seed(seed: int) -> None:
+def set_seed():
+    seed = 47
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -31,36 +33,15 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Train one SSL encoder for side-channel traces."
-    )
-
-    parser.add_argument("--method", choices=SSL_METHODS, required=True)
-    parser.add_argument("--input", default=str(DEFAULT_ASCAD_PATH))
-    parser.add_argument("--split", choices=("attack", "profiling"), default="attack")
-    parser.add_argument("--trace-window", type=parse_range, default=(0, 700))
-    parser.add_argument("--n-train", type=int, default=500)
-    parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--batch-size", type=int, default=None)
-    parser.add_argument("--lr", type=float, default=None)
-    parser.add_argument("--normalize", choices=("divide128", "zscore"), default=None)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--output-dir",
-        default=str(PROJECT_ROOT / "outputs" / "checkpoints"),
-    )
-
-    return parser
+def get_trace_window(opts):
+    tmp = opts.trace_window.split("_")
+    window_start, window_end = int(tmp[0]), int(tmp[1])
+    return window_start, window_end
 
 
 def make_run_name(opts, input_length: int) -> str:
-    window_start, window_end = opts.trace_window
-    return (
-        f"{opts.method}_{opts.backbone_name}_{opts.pool_mode}"
-        f"_w{window_start}-{window_end}_l{input_length}"
-        f"_n{opts.n_train}_ep{opts.epochs}_seed{opts.seed}"
-    )
+    window_start, window_end = get_trace_window(opts)
+    return f"{opts.method}_w{window_start}-{window_end}_n{opts.n_train}_ep{opts.epochs}"
 
 
 def save_training_artifacts(opts, model, train_result, input_length: int) -> Path:
@@ -68,7 +49,7 @@ def save_training_artifacts(opts, model, train_result, input_length: int) -> Pat
     output_dir.mkdir(parents=True, exist_ok=True)
 
     run_name = make_run_name(opts, input_length=input_length)
-    checkpoint_path = output_dir / f"{run_name}.pt"
+    checkpoint_path = os.path.join(output_dir, f"{run_name}.pt")
 
     torch.save(
         {
@@ -76,53 +57,38 @@ def save_training_artifacts(opts, model, train_result, input_length: int) -> Pat
             "method_metadata": get_method_metadata(opts.method),
             "model_state_dict": model.state_dict(),
             "input_length": input_length,
-            "trace_window": tuple(opts.trace_window),
+            "trace_window": opts.trace_window,
             "args": vars(opts),
         },
         checkpoint_path,
     )
 
     if len(train_result) > 1 and train_result[1] is not None:
-        np.save(output_dir / f"{run_name}_loss.npy", np.asarray(train_result[1]))
+        train_res_save_path = os.path.join(output_dir, f"{run_name}_loss.npy")
+        np.save(train_res_save_path, np.asarray(train_result[1]))
 
-    with (output_dir / f"{run_name}_config.json").open("w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "args": vars(opts),
-                "method_metadata": get_method_metadata(opts.method),
-            },
-            handle,
-            indent=2,
-            default=str,
-        )
+    json_save_path = os.path.join(output_dir, f"{run_name}_config.json")
+    with (json_save_path).open("w", encoding="utf-8") as handle:
+        json.dump({"args": vars(opts), "method_metadata": get_method_metadata(opts.method)}, handle, indent=2, default=str)
 
     return checkpoint_path
 
 
-def main(opts) -> None:
-    from src.methods.ssl_factory import train_ssl_model
+def main(opts):
+    set_seed()
 
-    set_seed(opts.seed)
-
-    window_start, window_end = opts.trace_window
+    window_start, window_end = get_trace_window(opts)
     input_length = window_end - window_start
 
-    X_train, _ = load_ascad_split(
-        h5_path=opts.input,
-        split=opts.split,
-        add_channel=False,
-        normalize=opts.normalize,
-        load_metadata=False,
-        trace_window=None,
-    )
+    X_train, y_train, plaintext = load_dataset(opts.input)
 
-    X_train = X_train[: opts.n_train]
     augmentation_family = parse_augmentation_family(opts.augmentations)
-    device = get_device(prefer_mps=False)
+    device = get_device()
 
     train_result = train_ssl_model(
         opts=opts,
         X_train=X_train,
+        y_train=y_train,
         device=device,
         trace_window=opts.trace_window,
         input_length=input_length,
@@ -140,11 +106,20 @@ def main(opts) -> None:
     print(f"Saved checkpoint: {checkpoint_path}")
 
 
+def parser_opts(argv):
+    parser = argparse.ArgumentParser(description="Train one SSL encoder for side-channel traces.")
+
+    parser.add_argument("-m", "--method", choices=SSL_METHODS, required=True)
+    parser.add_argument("-i", "--input", default=str(DEFAULT_ASCAD_PATH))
+    parser.add_argument("-o", "--output_dir", default=os.path.join(PROJECT_ROOT, "outputs", "checkpoints"))
+    parser.add_argument("-tw", "--trace_window", type=str, default="0_700")
+    parser.add_argument("-nt", "--n_train", type=int, default=500)
+    parser.add_argument("-e", "--epochs", type=int, default=None)
+
+    opts = parser.parse_args()
+    return opts
+
+
 if __name__ == "__main__":
-    cli_opts = build_parser().parse_args()
-    main(
-        build_method_options(
-            method=cli_opts.method,
-            overrides=vars(cli_opts),
-        )
-    )
+    opts = parser_opts(sys.argv[1:])
+    main(opts)

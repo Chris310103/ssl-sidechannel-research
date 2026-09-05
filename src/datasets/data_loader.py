@@ -109,74 +109,43 @@ def load_ascad_split(
     return X, y
 
 
-def load_from_hdf5(
-    h5_path: Union[str, Path],
-    db_name: str = "ascad",
-) -> Dict[str, Any]:
+def load_from_hdf5(h5_path: Union[str, Path]) -> Dict[str, Any]:
     h5_path = Path(h5_path)
+    # Open the ASCAD database HDF5 for reading
+    try:
+        in_file = h5py.File(ascad_database_file, "r")
+    except Exception:
+        raise ValueError("Error: can't open HDF5 file {} for reading (it might be malformed) ...".format(ascad_database_file))
 
-    if not h5_path.exists():
-        raise FileNotFoundError(f"HDF5 file not found: {h5_path}")
+    # Load profiling traces
+    X_profiling = np.array(in_file['Profiling_traces/traces'], dtype=np.int8)
+    # Load profiling labels
+    Y_profiling = np.array(in_file['Profiling_traces/labels'])
+    # Load attacking traces
+    X_attack = np.array(in_file['Attack_traces/traces'], dtype=np.int8)
+    # Load attacking labels
+    Y_attack = np.array(in_file['Attack_traces/labels'])
 
-    if db_name.lower() == "ascad":
-        profiling_split = load_ascad_split(
-            h5_path,
-            split="profiling",
-            add_channel=True,
-            normalize=None,
-            load_metadata=True,
-            trace_window=None,
-        )
-        attack_split = load_ascad_split(
-            h5_path,
-            split="attack",
-            add_channel=True,
-            normalize=None,
-            load_metadata=True,
-            trace_window=None,
-        )
+    # using numpy to save the data in .npz format
+    profiling_plaintext = in_file['Profiling_traces/metadata']
+    attack_plaintext = in_file['Attack_traces/metadata']
 
-        return {
-            "profiling": {
-                "X": profiling_split[0],
-                "y": profiling_split[1],
-                "metadata": profiling_split[2],
-            },
-            "attack": {
-                "X": attack_split[0],
-                "y": attack_split[1],
-                "metadata": attack_split[2],
-            },
-        }
+    data_dict = {
+        "X_profiling": X_profiling,
+        "Y_profiling": Y_profiling,
+        "X_attack": X_attack,
+        "Y_attack": Y_attack,
+        "profiling_plaintext": profiling_plaintext,
+        "attack_plaintext": attack_plaintext,
+    }
+    return data_dict
 
-    else:
-        raise ValueError(f"Unsupported database name: {db_name}. Use 'ascad'.")
 
-def load_from_npz(
-    npz_path: Union[str, Path],
-    db_name: str = "ascad",
-) -> Dict[str, Any]:
+def load_from_npz(npz_path: Union[str, Path]) -> Dict[str, Any]:
     npz_path = Path(npz_path)
 
-    if not npz_path.exists():
-        raise FileNotFoundError(f"NPZ file not found: {npz_path}")
-
-    if db_name.lower() == "ascad":
-        with np.load(npz_path, allow_pickle=True) as data:
-            return {
-                "profiling": {
-                    "X": data["X_profiling"],
-                    "y": data["Y_profiling"],
-                    "metadata": data.get("profiling_metadata", None),
-                },
-                "attack": {
-                    "X": data["X_attack"],
-                    "y": data["Y_attack"],
-                    "metadata": data.get("attack_metadata", None),
-                },
-            }
-    else:
-        raise ValueError(f"Unsupported database name: {db_name}. Use 'ascad'.")
+    data_dict = np.load(npz_path, allow_pickle=True)
+    return data_dict
 
 
 def load_dataset(inp_path: Union[str, Path], data_source: str = "hdf5", db_name: str = "ascad") -> Dict[str, Any]:
