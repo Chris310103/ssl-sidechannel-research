@@ -1,119 +1,26 @@
+import os
+import sys
+import argparse
+import h5py
+import numpy as np
+
 from typing import Literal, Optional, Tuple, Union, Dict, Any
 from pathlib import Path
 from typing import Literal, Optional, Tuple, Union, Dict, Any
 
-import h5py
-import numpy as np
 
-TraceWindow = Optional[Tuple[int, int]]
-
-def _apply_trace_window(
-    X: np.ndarray,
-    trace_window: TraceWindow = None,
-) -> np.ndarray:
-    if trace_window is None:
-        return X
-
-    if len(trace_window) != 2:
-        raise ValueError(
-            "trace_window must be a tuple: (window_start, window_end)"
-        )
-
-    window_start, window_end = trace_window
-    trace_length = X.shape[1]
-
-    if window_start < 0:
-        raise ValueError("window_start must be non-negative")
-
-    if window_end <= window_start:
-        raise ValueError("window_end must be greater than window_start")
-
-    if window_end > trace_length:
-        raise ValueError(
-            f"window_end={window_end} exceeds trace length={trace_length}"
-        )
-
-    return X[:, window_start:window_end]
-
-SplitName = Literal["profiling", "attack"]
-
-def _resolve_group_name(split: SplitName) -> str:
-    
-    if split == "profiling":
-        return "Profiling_traces"
-    if split == "attack":
-        return "Attack_traces"
-    raise ValueError(f"Unsupported split: {split}. Use 'profiling' or 'attack'.")
+def get_trace_window(trace_window_str):
+    tmp = trace_window_str.split("_")
+    start = int(tmp[0])
+    end = int(tmp[1])
+    return (start, end)
 
 
-def _apply_normalization(
-    X: np.ndarray,
-    normalize: Optional[Literal["divide128", "zscore"]] = None,
-) -> np.ndarray:
-
-    X = X.astype(np.float32)
-
-    if normalize is None:
-        return X
-
-    if normalize == "divide128":
-        return X / 128.0
-
-    if normalize == "zscore":
-        mean = X.mean(axis=1, keepdims=True)
-        std = X.std(axis=1, keepdims=True)
-        std = np.where(std == 0, 1.0, std)
-        return (X - mean) / std
-
-    raise ValueError(f"Unsupported normalization: {normalize}")
-
-def load_ascad_split(
-    h5_path: Union[str, Path],
-    split: SplitName = "profiling",
-    add_channel: bool = True,
-    normalize: Optional[Literal["divide128", "zscore"]] = None,
-    load_metadata: bool = False,
-    trace_window: TraceWindow = None,
-):
-    
-    h5_path = Path(h5_path)
-
-    if not h5_path.exists():
-        raise FileNotFoundError(f"ASCAD file not found: {h5_path}")
-
-    group_name = _resolve_group_name(split)
-
-    with h5py.File(h5_path, "r") as f:
-        if group_name not in f:
-            raise KeyError(f"Group '{group_name}' not found in {h5_path}")
-
-        group = f[group_name]
-
-        X = np.array(group["traces"], dtype=np.float32)
-        y = np.array(group["labels"])
-
-        X = _apply_trace_window(
-            X,
-            trace_window=trace_window,
-        )
-
-        X = _apply_normalization(X, normalize=normalize)
-
-        if add_channel:
-            X = X[..., None]  # (N, T) -> (N, T, 1)
-
-        if load_metadata:
-            metadata = np.array(group["metadata"])
-            return X, y, metadata
-
-    return X, y
-
-
-def load_from_hdf5(h5_path: Union[str, Path]) -> Dict[str, Any]:
+def load_from_hdf5(h5_path):
     h5_path = Path(h5_path)
     # Open the ASCAD database HDF5 for reading
     try:
-        in_file = h5py.File(ascad_database_file, "r")
+        in_file = h5py.File(h5_path, "r")
     except Exception:
         raise ValueError("Error: can't open HDF5 file {} for reading (it might be malformed) ...".format(ascad_database_file))
 
@@ -141,50 +48,64 @@ def load_from_hdf5(h5_path: Union[str, Path]) -> Dict[str, Any]:
     return data_dict
 
 
-def load_from_npz(npz_path: Union[str, Path]) -> Dict[str, Any]:
+def load_from_npz(npz_path):
     npz_path = Path(npz_path)
 
     data_dict = np.load(npz_path, allow_pickle=True)
     return data_dict
 
 
-def load_dataset(inp_path: Union[str, Path], data_source: str = "hdf5", db_name: str = "ascad") -> Dict[str, Any]:
-    """
-        So, this function is loading the dataset based on the data source and database name.
-        It currently supports loading the ASCAD dataset or DF dataset from an HDF5 file, or npz file.
-        It returns a dictionary containing the profiling and attack traces, labels, and optionally metadata.
-    """
-    # first, we check if the input path exists
-    inp_path = Path(inp_path)
-    if not inp_path.exists():
-        raise FileNotFoundError(f"Input path not found: {inp_path}")
+def load_dataset(data_path, trace_window = None):
+    """ function to load the dataset from the given path. It supports loading from HDF5 or NPZ files. """
+    if data_path.endswith(".h5"):
+        data_dict = load_from_hdf5(data_path)
+        X_data = data_dict["X_profiling"]
+        y_data = data_dict["Y_profiling"]
+        plaintext = data_dict["profiling_plaintext"]
 
-    # second, we load the dataset based on the data source
-    if data_source == "hdf5":
-        data_dict = load_from_hdf5(inp_path, db_name)
-    elif data_source == "npz":
-        data_dict = load_from_npz(inp_path, db_name)
+        # save the attack/testing data
+        save_path = Path(data_path).with_suffix(".npz")
+        np.savez_compressed(
+            save_path,
+            X_test=data_dict["X_attack"],
+            y_test=data_dict["Y_attack"],
+            plaintext=data_dict["attack_plaintext"],
+        )
+    elif data_path.endswith(".npz")
+        data_dict = load_from_npz(data_path)
+        X_data = data_dict["X_train"]
+        y_data = data_dict["y_train"]
+        plaintext = data_dict["plaintext"]
     else:
-        raise ValueError(f"Unsupported data source: {data_source}. Use 'hdf5' or 'npz'.")
+        raise ValueError(f"Unsupported file format: {data_path}. Use .h5 or .npz.")
 
-    # third, return the data dictionary
-    return data_dict
+    if trace_window is not None:
+        start, end = trace_window
+        X_data = X_data[:, start:end]
+        y_data = y_data[:, start:end]
+
+    return X_data, y_data, plaintext
+
+
+def parse_opts(argv):
+    parser = argparse.ArgumentParser(description="Load dataset from HDF5 or NPZ file.")
+    parser.add_argument("-i", "input_path", type=str, help="Path to the dataset file (.h5 or .npz).")
+    parser.add_argument("--trace_window", type=int, nargs=2, default=None,
+                        help="Optional trace window as two integers: start end.")
+    opts = parser.parse_args(argv)
+    return opts
 
 
 if __name__ == "__main__":
-    ascad_path = "data/raw/ascad/ASCAD.h5"
+    # Example usage of the load_dataset function and for testing the loading of the dataset
+    opts = parse_opts(sys.argv[1:])
+    data_path = opts.input_path
+    trace_window_str = opts.trace_window
+    trace_window = get_trace_window(trace_window_str)
 
-    X, y = load_ascad_split(
-            h5_path=ascad_path,
-            split="profiling",
-            add_channel=True,
-            normalize=None,
-            load_metadata=False,
-            trace_window=None,
-        )
+    X_data, y_data, plaintext = load_dataset(data_path, trace_window)
 
-    print("X shape:", X.shape)
-    print("y shape:", y.shape)
-    print("X dtype:", X.dtype)
-    print("y dtype:", y.dtype)
-    print("First labels:", y[:10])
+    print("X shape:", X_data.shape)
+    print("y shape:", y_data.shape)
+    print("Plaintext shape:", plaintext.shape)
+    print("Plaintext:", plaintext[:10])  # Print first 10 plaintext values for verification

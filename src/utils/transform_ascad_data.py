@@ -4,6 +4,7 @@ import argparse
 
 import numpy as np
 import h5py
+import pdb
 
 
 def check_file_exists(file_path):
@@ -13,7 +14,7 @@ def check_file_exists(file_path):
     return
 
 
-def load_and_save_ascad(ascad_database_file, output_file):
+def load_and_save_ascad(ascad_database_file, output_dir):
     check_file_exists(ascad_database_file)
 
     # Open the ASCAD database HDF5 for reading
@@ -34,31 +35,38 @@ def load_and_save_ascad(ascad_database_file, output_file):
     # using numpy to save the data in .npz format
     profile_metadata = in_file['Profiling_traces/metadata']
     attack_metadata = in_file['Attack_traces/metadata']
+    pdb.set_trace()
+    # save the training data to a .npz file
+    output_train_file = os.path.join(output_dir, os.path.splitext(os.path.basename(ascad_database_file))[0] + "_train.npz")
     np.savez_compressed(
-        output_file,
-        X_profiling=X_profiling,
-        Y_profiling=Y_profiling,
-        X_attack=X_attack,
-        Y_attack=Y_attack,
-        profiling_metadata=profile_metadata,
-        attack_metadata=attack_metadata,
+        output_train_file,
+        X_train=X_profiling,
+        y_train=Y_profiling,
+        plaintext=profile_metadata
     )
 
-    print("Successfully converted ASCAD database to .npz format with metadata and saved to '%s'." % output_file)
+    print("Successfully converted ASCAD database to .npz format with plaintext and saved training data to '%s'." % output_train_file)
 
+    # save the testing data to a .npz file
+    output_test_file = os.path.join(output_dir, os.path.splitext(os.path.basename(ascad_database_file))[0] + "_test.npz")
+    np.savez_compressed(
+        output_test_file,
+        X_test=X_attack,
+        y_test=Y_attack,
+        plaintext=attack_metadata,
+    )
+
+    print("Successfully converted ASCAD database to .npz format with plaintext and saved testing data to '%s'." % output_test_file)
+    
 
 def main(opts):
     input_file = opts.input
     output_dir = opts.output
     os.makedirs(output_dir, exist_ok=True)
 
-    input_name = os.path.basename(input_file)
-    input_name_no_ext = os.path.splitext(input_name)[0]
-    output_file = os.path.join(output_dir, input_name_no_ext + ".npz")
-
     print("Loading metadata from the ASCAD database...")
-    print("Loading ASCAD database from '%s' and saving to '%s'..." % (input_file, output_file))
-    load_and_save_ascad(input_file, output_file)
+    print("Loading ASCAD database from '%s' and saving to '%s'..." % (input_file, output_dir))
+    load_and_save_ascad(input_file, output_dir)
 
 
 def parse_opts(argv):
