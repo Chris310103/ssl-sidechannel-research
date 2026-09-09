@@ -14,6 +14,26 @@ def check_file_exists(file_path):
     return
 
 
+def extract_plaintext_from_metadata(metadata):
+    # Extract the plaintext and the key from the metadata
+    tmp_plaintext_list = []
+    tmp_key_list = []
+    
+    for i in range(len(metadata)):
+        tmp_plaintext_list.append(metadata[i]['plaintext'])
+        tmp_key_list.append(metadata[i]['key'])
+
+    plaintext = np.array(tmp_plaintext_list, dtype=np.uint8)
+
+    # distinguish fixed key and variable key
+    if np.array_equal(tmp_key_list[0], tmp_key_list[-1]):
+        key = np.array(tmp_key_list[0], dtype=np.uint8)
+    else:
+        key = np.array(tmp_key_list, dtype=np.uint8)
+    pdb.set_trace()
+    return plaintext, key
+
+
 def load_and_save_ascad(ascad_database_file, output_dir):
     check_file_exists(ascad_database_file)
 
@@ -35,14 +55,19 @@ def load_and_save_ascad(ascad_database_file, output_dir):
     # using numpy to save the data in .npz format
     profile_metadata = in_file['Profiling_traces/metadata']
     attack_metadata = in_file['Attack_traces/metadata']
-    pdb.set_trace()
+
+    # convert the metadata to plaintext
+    profile_plaintext, key = extract_plaintext_from_metadata(profile_metadata)
+    attack_plaintext, key = extract_plaintext_from_metadata(attack_metadata)
+
     # save the training data to a .npz file
     output_train_file = os.path.join(output_dir, os.path.splitext(os.path.basename(ascad_database_file))[0] + "_train.npz")
     np.savez_compressed(
         output_train_file,
         X_train=X_profiling,
         y_train=Y_profiling,
-        plaintext=profile_metadata
+        plaintext=profile_plaintext,
+        key=key
     )
 
     print("Successfully converted ASCAD database to .npz format with plaintext and saved training data to '%s'." % output_train_file)
@@ -53,7 +78,8 @@ def load_and_save_ascad(ascad_database_file, output_dir):
         output_test_file,
         X_test=X_attack,
         y_test=Y_attack,
-        plaintext=attack_metadata,
+        plaintext=attack_plaintext,
+        key=key
     )
 
     print("Successfully converted ASCAD database to .npz format with plaintext and saved testing data to '%s'." % output_test_file)
