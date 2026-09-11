@@ -28,9 +28,11 @@ def extract_plaintext_from_metadata(metadata):
     # distinguish fixed key and variable key
     if np.array_equal(tmp_key_list[0], tmp_key_list[-1]):
         key = np.array(tmp_key_list[0], dtype=np.uint8)
+        print("Fixed key detected in the metadata.")
     else:
         key = np.array(tmp_key_list, dtype=np.uint8)
-    pdb.set_trace()
+        print("Variable key detected in the metadata.")
+
     return plaintext, key
 
 
