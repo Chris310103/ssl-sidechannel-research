@@ -1,10 +1,32 @@
 import os
 import sys
 import argparse
-
+from pathlib import Path
 import numpy as np
 import h5py
 import pdb
+
+
+###################################################################
+def load_from_hdf5(h5_path, which_one: str) -> dict:
+    h5_path = Path(h5_path)
+    group_name = {"train": "Profiling_traces", "test": "Attack_traces"}.get(which_one)
+    if group_name is None:
+        raise ValueError("which_one must be train or test")
+
+    try:
+        with h5py.File(h5_path, "r") as in_file:
+            group = in_file[group_name]
+            traces = np.asarray(group["traces"], dtype=np.int8)
+            labels = np.asarray(group["labels"])
+            plaintext, key = extract_plaintext_from_metadata(group["metadata"])
+    except OSError as error:
+        raise ValueError(f"Cannot open HDF5 file {h5_path} for reading") from error
+
+    if which_one == "train":
+        return {"X_train": traces, "y_train": labels, "plaintext": plaintext, "key": key}
+    return {"X_test": traces, "y_test": labels, "plaintext": plaintext, "key": key}
+###################################################################
 
 
 def check_file_exists(file_path):
@@ -18,10 +40,10 @@ def extract_plaintext_from_metadata(metadata):
     # Extract the plaintext and the key from the metadata
     tmp_plaintext_list = []
     tmp_key_list = []
-    
+
     for i in range(len(metadata)):
-        tmp_plaintext_list.append(metadata[i]['plaintext'])
-        tmp_key_list.append(metadata[i]['key'])
+        tmp_plaintext_list.append(metadata[i]["plaintext"])
+        tmp_key_list.append(metadata[i]["key"])
 
     plaintext = np.array(tmp_plaintext_list, dtype=np.uint8)
 
@@ -46,17 +68,17 @@ def load_and_save_ascad(ascad_database_file, output_dir):
         raise ValueError("Error: can't open HDF5 file {} for reading (it might be malformed) ...".format(ascad_database_file))
 
     # Load profiling traces
-    X_profiling = np.array(in_file['Profiling_traces/traces'], dtype=np.int8)
+    X_profiling = np.array(in_file["Profiling_traces/traces"], dtype=np.int8)
     # Load profiling labels
-    Y_profiling = np.array(in_file['Profiling_traces/labels'])
+    Y_profiling = np.array(in_file["Profiling_traces/labels"])
     # Load attacking traces
-    X_attack = np.array(in_file['Attack_traces/traces'], dtype=np.int8)
+    X_attack = np.array(in_file["Attack_traces/traces"], dtype=np.int8)
     # Load attacking labels
-    Y_attack = np.array(in_file['Attack_traces/labels'])
+    Y_attack = np.array(in_file["Attack_traces/labels"])
 
     # using numpy to save the data in .npz format
-    profile_metadata = in_file['Profiling_traces/metadata']
-    attack_metadata = in_file['Attack_traces/metadata']
+    profile_metadata = in_file["Profiling_traces/metadata"]
+    attack_metadata = in_file["Attack_traces/metadata"]
 
     # convert the metadata to plaintext
     profile_plaintext, key = extract_plaintext_from_metadata(profile_metadata)
@@ -64,28 +86,16 @@ def load_and_save_ascad(ascad_database_file, output_dir):
 
     # save the training data to a .npz file
     output_train_file = os.path.join(output_dir, os.path.splitext(os.path.basename(ascad_database_file))[0] + "_train.npz")
-    np.savez_compressed(
-        output_train_file,
-        X_train=X_profiling,
-        y_train=Y_profiling,
-        plaintext=profile_plaintext,
-        key=key
-    )
+    np.savez_compressed(output_train_file, X_train=X_profiling, y_train=Y_profiling, plaintext=profile_plaintext, key=key)
 
     print("Successfully converted ASCAD database to .npz format with plaintext and saved training data to '%s'." % output_train_file)
 
     # save the testing data to a .npz file
     output_test_file = os.path.join(output_dir, os.path.splitext(os.path.basename(ascad_database_file))[0] + "_test.npz")
-    np.savez_compressed(
-        output_test_file,
-        X_test=X_attack,
-        y_test=Y_attack,
-        plaintext=attack_plaintext,
-        key=key
-    )
+    np.savez_compressed(output_test_file, X_test=X_attack, y_test=Y_attack, plaintext=attack_plaintext, key=key)
 
     print("Successfully converted ASCAD database to .npz format with plaintext and saved testing data to '%s'." % output_test_file)
-    
+
 
 def main(opts):
     input_file = opts.input
@@ -99,8 +109,8 @@ def main(opts):
 
 def parse_opts(argv):
     parser = argparse.ArgumentParser()
-    parser.add_argument('-i', '--input', help='')
-    parser.add_argument('-o', '--output', help='')
+    parser.add_argument("-i", "--input", help="")
+    parser.add_argument("-o", "--output", help="")
     opts = parser.parse_args(argv)
     return opts
 

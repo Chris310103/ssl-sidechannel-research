@@ -4,18 +4,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+VALID_AUGMENTATIONS = ("identity", "gaussian_noise", "denoise", "random_shift")
 
-VALID_AUGMENTATIONS = (
-    "identity",
-    "gaussian_noise",
-    "denoise",
-    "random_shift",
-)
-
-_AUGMENTATION_ALIASES = {
-    "noise": "gaussian_noise",
-    "shift": "random_shift",
-}
+_AUGMENTATION_ALIASES = {"noise": "gaussian_noise", "shift": "random_shift"}
 
 
 def ensure_trace_matrix(X: np.ndarray) -> np.ndarray:
@@ -30,10 +21,7 @@ def ensure_trace_matrix(X: np.ndarray) -> np.ndarray:
     if X.ndim == 3 and X.shape[1] == 1:
         return X[:, 0, :]
 
-    raise ValueError(
-        "Expected traces as a matrix with one trace per row; "
-        f"received shape {X.shape}"
-    )
+    raise ValueError("Expected traces as a matrix with one trace per row; " f"received shape {X.shape}")
 
 
 def ensure_batch_trace_matrix(x: torch.Tensor) -> torch.Tensor:
@@ -46,10 +34,7 @@ def ensure_batch_trace_matrix(x: torch.Tensor) -> torch.Tensor:
     if x.ndim == 3 and x.shape[1] == 1:
         return x.squeeze(1)
 
-    raise ValueError(
-        "Expected a trace batch with shape (batch, length), (batch, length, 1), "
-        f"or (batch, 1, length); received {tuple(x.shape)}"
-    )
+    raise ValueError("Expected a trace batch with shape (batch, length), (batch, length, 1), " f"or (batch, 1, length); received {tuple(x.shape)}")
 
 
 def apply_trace_window(x: torch.Tensor, trace_window: Tuple[int, int]) -> torch.Tensor:
@@ -65,9 +50,7 @@ def apply_trace_window(x: torch.Tensor, trace_window: Tuple[int, int]) -> torch.
         raise ValueError("window_end must be greater than window_start")
 
     if window_end > x.shape[1]:
-        raise ValueError(
-            f"window_end={window_end} exceeds trace length={x.shape[1]}"
-        )
+        raise ValueError(f"window_end={window_end} exceeds trace length={x.shape[1]}")
 
     return x[:, window_start:window_end]
 
@@ -81,25 +64,14 @@ def normalize_augmentation_name(augmentation: str) -> str:
 
 
 def parse_augmentation_family(augmentations: str) -> Tuple[str, ...]:
-    family = tuple(
-        normalize_augmentation_name(augmentation.strip())
-        for augmentation in augmentations.split(",")
-        if augmentation.strip()
-    )
+    family = tuple(normalize_augmentation_name(augmentation.strip()) for augmentation in augmentations.split(",") if augmentation.strip())
 
     if not family:
         raise ValueError("At least one augmentation must be provided")
 
-    invalid = [
-        augmentation
-        for augmentation in family
-        if augmentation not in VALID_AUGMENTATIONS
-    ]
+    invalid = [augmentation for augmentation in family if augmentation not in VALID_AUGMENTATIONS]
     if invalid:
-        raise ValueError(
-            f"Unsupported augmentation(s): {invalid}. "
-            f"Supported values: {VALID_AUGMENTATIONS}"
-        )
+        raise ValueError(f"Unsupported augmentation(s): {invalid}. " f"Supported values: {VALID_AUGMENTATIONS}")
 
     return family
 
@@ -114,12 +86,7 @@ def random_shift(x: torch.Tensor, max_shift: int = 5) -> torch.Tensor:
         return x
 
     shifted = torch.zeros_like(x)
-    shifts = torch.randint(
-        low=-max_shift,
-        high=max_shift + 1,
-        size=(x.shape[0],),
-        device=x.device,
-    )
+    shifts = torch.randint(low=-max_shift, high=max_shift + 1, size=(x.shape[0],), device=x.device)
 
     trace_length = x.shape[1]
 
@@ -156,22 +123,13 @@ def denoise_moving_average(x: torch.Tensor, kernel_size: int = 5) -> torch.Tenso
         raise ValueError("denoise_kernel_size must be odd")
 
     x_channels_first = x.unsqueeze(1)
-    denoised = F.avg_pool1d(
-        x_channels_first,
-        kernel_size=kernel_size,
-        stride=1,
-        padding=kernel_size // 2,
-    )
+    denoised = F.avg_pool1d(x_channels_first, kernel_size=kernel_size, stride=1, padding=kernel_size // 2)
 
     return denoised.squeeze(1)
 
 
 def apply_trace_augmentation(
-    x: torch.Tensor,
-    augmentation: str,
-    max_shift: int = 5,
-    noise_std: float = 0.05,
-    denoise_kernel_size: int = 5,
+    x: torch.Tensor, augmentation: str, max_shift: int = 5, noise_std: float = 0.05, denoise_kernel_size: int = 5
 ) -> torch.Tensor:
     augmentation = normalize_augmentation_name(augmentation)
     x = ensure_batch_trace_matrix(x)
@@ -183,16 +141,10 @@ def apply_trace_augmentation(
         return add_gaussian_noise(x, noise_std=noise_std)
 
     if augmentation == "denoise":
-        return denoise_moving_average(
-            x,
-            kernel_size=denoise_kernel_size,
-        )
+        return denoise_moving_average(x, kernel_size=denoise_kernel_size)
 
     if augmentation == "random_shift":
-        return random_shift(
-            x,
-            max_shift=max_shift,
-        )
+        return random_shift(x, max_shift=max_shift)
 
     raise ValueError(f"Unsupported augmentation: {augmentation}")
 
@@ -216,34 +168,16 @@ def make_trace_view(
             raise ValueError("At least one augmentation must be provided")
 
         if not 0.0 <= augmentation_probability <= 1.0:
-            raise ValueError(
-                "augmentation_probability must be in [0, 1], "
-                f"got {augmentation_probability}"
-            )
+            raise ValueError("augmentation_probability must be in [0, 1], " f"got {augmentation_probability}")
 
         view = x
-        apply_mask = torch.rand(
-            x.shape[0],
-            len(augmentation_family),
-            device=x.device,
-        ) < augmentation_probability
+        apply_mask = torch.rand(x.shape[0], len(augmentation_family), device=x.device) < augmentation_probability
 
-        no_augmented_samples = ~torch.any(
-            apply_mask,
-            dim=1,
-        )
+        no_augmented_samples = ~torch.any(apply_mask, dim=1)
         if torch.any(no_augmented_samples):
             row_indices = no_augmented_samples.nonzero(as_tuple=True)[0]
-            fallback_choices = torch.randint(
-                low=0,
-                high=len(augmentation_family),
-                size=(row_indices.shape[0],),
-                device=x.device,
-            )
-            apply_mask[
-                row_indices,
-                fallback_choices,
-            ] = True
+            fallback_choices = torch.randint(low=0, high=len(augmentation_family), size=(row_indices.shape[0],), device=x.device)
+            apply_mask[row_indices, fallback_choices] = True
 
         for choice_index, chosen_augmentation in enumerate(augmentation_family):
             mask = apply_mask[:, choice_index]
@@ -252,23 +186,13 @@ def make_trace_view(
 
             view = view.clone()
             view[mask] = apply_trace_augmentation(
-                view[mask],
-                augmentation=chosen_augmentation,
-                max_shift=max_shift,
-                noise_std=noise_std,
-                denoise_kernel_size=denoise_kernel_size,
+                view[mask], augmentation=chosen_augmentation, max_shift=max_shift, noise_std=noise_std, denoise_kernel_size=denoise_kernel_size
             )
 
         view = apply_trace_window(view, trace_window=trace_window)
         return add_channel_dimension(view)
 
-    view = apply_trace_augmentation(
-        x,
-        augmentation=augmentation,
-        max_shift=max_shift,
-        noise_std=noise_std,
-        denoise_kernel_size=denoise_kernel_size,
-    )
+    view = apply_trace_augmentation(x, augmentation=augmentation, max_shift=max_shift, noise_std=noise_std, denoise_kernel_size=denoise_kernel_size)
     view = apply_trace_window(view, trace_window=trace_window)
 
     return add_channel_dimension(view)

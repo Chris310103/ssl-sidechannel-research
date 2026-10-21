@@ -1,9 +1,52 @@
+import os
+import sys
+import pdb
 import torch
 import torch.nn as nn
 from typing import Optional
+import src.utils.supporting_functions as supporting_functions
 
 
-class TraceTransformer1D(nn.Module):
+# ---------------------------------------------------------------------------
+# Keras-compatibility helpers
+# ---------------------------------------------------------------------------
+def keras_default_init(module):
+    """Keras Dense/Conv default init: glorot_uniform kernel, zero bias."""
+    if isinstance(module, (nn.Conv1d, nn.Linear)):
+        nn.init.xavier_uniform_(module.weight)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+
+
+def he_normal_init(module):
+    """Keras kernel_initializer='he_normal'."""
+    nn.init.kaiming_normal_(module.weight, mode="fan_in", nonlinearity="relu")
+    if module.bias is not None:
+        nn.init.zeros_(module.bias)
+
+
+def keras_batchnorm(num_features):
+    """Keras BatchNormalization defaults (momentum=0.99, epsilon=1e-3).
+
+    Keras momentum is the decay of the running stats; PyTorch momentum is its
+    complement, hence momentum=0.01.
+    """
+    return nn.BatchNorm1d(num_features, eps=1e-3, momentum=0.01)
+
+
+def same_padding(kernel_size):
+    """Padding that reproduces Keras padding='same' for odd kernels.
+
+    Verified exactly equal to ceil(L/stride) for kernel_size in {1, 11} and
+    stride in {1, 2}, which covers every conv in this file.
+    """
+    return kernel_size // 2
+
+
+# ---------------------------------------------------------------------------
+#   Model definitions
+# ---------------------------------------------------------------------------
+class TraceTransformer1D_encoder(nn.Module):
     """Patch-based Transformer encoder for one-dimensional power traces."""
 
     def __init__(
@@ -32,9 +75,7 @@ class TraceTransformer1D(nn.Module):
         self.num_patches = (input_length + patch_size - 1) // patch_size
 
         self.patch_projection = nn.Linear(self.patch_dim, embed_dim)
-        self.position_embedding = nn.Parameter(
-            torch.zeros(1, self.num_patches, embed_dim)
-        )
+        self.position_embedding = nn.Parameter(torch.zeros(1, self.num_patches, embed_dim))
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
@@ -45,10 +86,7 @@ class TraceTransformer1D(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        self.encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=depth,
-        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=depth)
         self.norm = nn.LayerNorm(embed_dim)
 
         nn.init.trunc_normal_(self.position_embedding, std=0.02)
@@ -67,30 +105,17 @@ class TraceTransformer1D(nn.Module):
     def patchify(self, x: torch.Tensor) -> torch.Tensor:
         x = self._to_channels_last(x)
         batch_size, trace_length, channels = x.shape
-        padded_length = (
-            (trace_length + self.patch_size - 1) // self.patch_size
-        ) * self.patch_size
+        padded_length = ((trace_length + self.patch_size - 1) // self.patch_size) * self.patch_size
 
         if padded_length != trace_length:
-            padding = x.new_zeros(
-                batch_size,
-                padded_length - trace_length,
-                channels,
-            )
+            padding = x.new_zeros(batch_size, padded_length - trace_length, channels)
             x = torch.cat([x, padding], dim=1)
 
-        return x.reshape(
-            batch_size,
-            padded_length // self.patch_size,
-            self.patch_dim,
-        )
+        return x.reshape(batch_size, padded_length // self.patch_size, self.patch_dim)
 
     def position_tokens(self, number_of_patches: int) -> torch.Tensor:
         if number_of_patches > self.num_patches:
-            raise ValueError(
-                "Trace produces more patches than configured: "
-                f"{number_of_patches} > {self.num_patches}"
-            )
+            raise ValueError("Trace produces more patches than configured: " f"{number_of_patches} > {self.num_patches}")
         return self.position_embedding[:, :number_of_patches]
 
     def embed_patch_values(self, patch_values: torch.Tensor) -> torch.Tensor:
@@ -119,10 +144,7 @@ class TraceTransformer1D(nn.Module):
         if pool == "max":
             return features.max(dim=1).values
         if pool == "mean_max":
-            return torch.cat(
-                [features.mean(dim=1), features.max(dim=1).values],
-                dim=1,
-            )
+            return torch.cat([features.mean(dim=1), features.max(dim=1).values], dim=1)
         if pool in ("none", None):
             return features
         raise ValueError(f"Unsupported pooling mode: {pool}")
@@ -133,20 +155,68 @@ class TraceTransformer1D(nn.Module):
         if pool == "mean_max":
             return self.output_channels * 2
         if pool in ("none", None):
-            raise ValueError(
-                "Temporal output does not have one fixed vector dimension."
-            )
+            raise ValueError("Temporal output does not have one fixed vector dimension.")
         raise ValueError(f"Unsupported pooling mode: {pool}")
 
     def get_temporal_output_dim(self) -> int:
         return self.output_channels
 
 
-class CnnBestNorm(nn.Module):
-    """
-    PyTorch implementation of the 'cnn_best_norm' architecture.
-    Based on VGG16 design, adapted for 1D signals.
+class TraceTransformer1D_decoder_only(nn.Module):
+    def __init__(self):
+        pass
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        pass
+
+    def encode(self, x: torch.Tensor, pool: str = "mean") -> torch.Tensor:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# CNN best models (VGG16-inspired 1D)
+# ---------------------------------------------------------------------------
+class SCAModel(nn.Module):
+    """Base class holding the bits Keras used to keep inside model.compile()."""
+    #: names of the model outputs, in the order the loss/targets are stacked
+    output_names = ["predictions"]
+    #: expected trace length (replaces the Keras input_shape sanity check)
+    input_dim = None
+    #: kwargs needed to rebuild this model from a checkpoint
+    init_kwargs = {}
+    #: optimizer spec: ("rmsprop"|"adam", lr)
+    optimizer_spec = ("adam", 1e-3)
+
+    @property
+    def multi_output(self):
+        return len(self.output_names) > 1
+
+
+    def configure_optimizer(self):
+        kind, lr = self.optimizer_spec
+        if kind == "rmsprop":
+            # Keras RMSprop defaults: rho=0.9, epsilon=1e-7
+            return torch.optim.RMSprop(self.parameters(), lr=lr, alpha=0.9, eps=1e-7)
+        # Keras Adam defaults: beta_1=0.9, beta_2=0.999, epsilon=1e-7
+        return torch.optim.Adam(self.parameters(), lr=lr, betas=(0.9, 0.999), eps=1e-7)
+
+
+    def _infer_flat_size(self, feature_fn, input_dim, in_channels=1):
+        """Run a dummy tensor through the feature extractor to size the head."""
+        try:
+            device = next(feature_fn.parameters()).device
+        except (StopIteration, AttributeError):
+            device = torch.device("cpu")
+
+        self.eval()
+        with torch.no_grad():
+            dummy = torch.zeros(1, in_channels, input_dim, device=device)
+            flat = feature_fn(dummy).flatten(1).shape[1]
+        return flat
+
+
+class CnnBestNorm(SCAModel):
+    """
     Parameters
     ----------
     input_channels : int, default=1
@@ -161,330 +231,151 @@ class CnnBestNorm(nn.Module):
         Flatten operation. Any other length will cause size mismatch.
     """
 
-    def __init__(self, input_channels: int = 1, input_length: int = 1400):
+    def __init__(self, input_length=700, emb_size=256, name="cnn_best"):
         super().__init__()
-        self.input_channels = input_channels
+        self.first_stride = 2
+        self.input_channels = 1
+        self.input_length = input_length
+        self.emb_size = emb_size
+        self.output_names = ["predictions"]
+        self.optimizer_spec = ("rmsprop", 0.00001)
+        self.name = name
+        self.init_kwargs = dict(input_channels=self.input_channels, input_length=self.input_length,
+                                emb_size=self.emb_size, first_stride=self.first_stride, name=self.name)
         self.input_length = input_length
 
-        emb_size = 256
-        classification = True
-        self.emb_size = emb_size
-        self.classification = classification
+        kernel = 11
+        pad_size = same_padding(kernel)
+        blocks = []
 
-        # ---------- Convolutional blocks (feature extractor) ----------
-        self.conv = nn.Sequential(
-            # Block 1
-            nn.Conv1d(input_channels, 64, kernel_size=11, stride=2, padding=5),
-            nn.AvgPool1d(kernel_size=2, stride=2),
-            nn.BatchNorm1d(64),
-            nn.ReLU(inplace=True),
-            # Block 2
-            nn.Conv1d(64, 128, kernel_size=11, stride=2, padding=5),
-            nn.AvgPool1d(kernel_size=2, stride=2),
-            nn.BatchNorm1d(128),
-            nn.ReLU(inplace=True),
-            # Block 3
-            nn.Conv1d(128, 256, kernel_size=11, stride=2, padding=5),
-            nn.AvgPool1d(kernel_size=2, stride=2),
-            nn.BatchNorm1d(256),
-            nn.ReLU(inplace=True),
-            # Block 4
-            nn.Conv1d(256, 512, kernel_size=11, stride=2, padding=5),
-            nn.AvgPool1d(kernel_size=2, stride=2),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            # Block 5
-            nn.Conv1d(512, 512, kernel_size=11, stride=2, padding=5),
-            nn.AvgPool1d(kernel_size=2, stride=2),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-        )
+        in_c = 1
+        for i, out_c in enumerate([64, 128, 256, 512, 512]):
+            stride = self.first_stride if i == 0 else 1
+            blocks += [
+                nn.Conv1d(in_c, out_c, kernel, stride=stride, padding=pad_size),
+                nn.ReLU(),
+                nn.AvgPool1d(2, stride=2),
+                nn.BatchNorm1d(out_c),
+            ]
+            in_c = out_c
+        self.features = nn.Sequential(*blocks)
 
-        # Compute the number of features after all conv/pool layers.
-        # We need this to know the input size of the first FC layer.
-        self._conv_output_features = self._calc_conv_output_size(input_length)
-        self._num_time_steps = self._calc_output_time_steps(input_length)
-
-        # ---------- Fully connected classifier ----------
+        flat = self._infer_flat_size(self.features, input_length)
+        
         self.fc = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(self._conv_output_features, 4096),
-            nn.ReLU(inplace=True),
-            nn.Linear(4096, 4096),
-            nn.ReLU(inplace=True),
-            nn.Linear(4096, emb_size),
+            nn.Linear(flat, 4096), nn.ReLU(),
+            nn.Linear(4096, 4096), nn.ReLU(),
+            nn.Linear(4096, self.emb_size),
         )
 
-        # Apply the appropriate final activation
-        if classification:
-            self.final_act = nn.Softmax(dim=1)
-        else:
-            self.final_act = nn.ReLU(inplace=True)
+        self.embedding = nn.Sequential(
+            nn.Linear(flat, 4096), nn.ReLU(),
+            nn.Linear(4096, 2048), nn.ReLU(),
+            nn.Linear(2048, 256),
+        )
+        
+        self.apply(keras_default_init)
 
-    # ------------------------------------------------------------------
-    #   Helper methods to compute output dimensions
-    # ------------------------------------------------------------------
-    def _calc_output_time_steps(self, length: int) -> int:
-        """Compute the number of time steps after the conv blocks."""
-        L = length
-        for _ in range(5):  # 5 blocks
-            # Conv1d stride=2, padding=5, kernel=11
-            L = (L + 2 * 5 - 11) // 2 + 1
-            # AvgPool1d kernel=2, stride=2
-            L = (L + 0 - 2) // 2 + 1  # padding=0 for pool
-        return L
-
-    def _calc_conv_output_size(self, length: int) -> int:
-        """Total number of features after conv blocks (channels * time steps)."""
-        return 512 * self._calc_output_time_steps(length)
-
-    # ------------------------------------------------------------------
-    #   Dimension‑helpers (matching SharedCNN1D style)
-    # ------------------------------------------------------------------
-    @property
-    def output_channels(self) -> int:
-        """Number of channels in the temporal feature map."""
-        return 512
-
-    def get_temporal_output_dim(self) -> int:
-        """Dimension of each time step in the feature map."""
-        return self.output_channels
-
-    def get_output_dim(self, pool: Optional[str] = None) -> int:
-        """Dimension of the final output vector (embedding or class probs)."""
-        return self.emb_size
-
-    # ------------------------------------------------------------------
-    #   Input format handling (same logic as SharedCNN1D)
-    # ------------------------------------------------------------------
-    def _to_channels_first(self, x: torch.Tensor) -> torch.Tensor:
-        """Ensure input is (batch, channels, length)."""
-        if x.ndim != 3:
-            raise ValueError(f"Expected 3D input, got {tuple(x.shape)}")
-        if x.shape[-1] == self.input_channels:
-            return x.transpose(1, 2)   # (B, L, C) -> (B, C, L)
-        if x.shape[1] == self.input_channels:
-            return x                   # already (B, C, L)
-        raise ValueError(f"Unexpected input shape: {tuple(x.shape)}")
-
-    # ------------------------------------------------------------------
-    #   Core forward methods
-    # ------------------------------------------------------------------
-    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Return the temporal feature map from the convolutional backbone.
-
-        Output shape: (batch, time_steps, 512)
-        """
-        x = self._to_channels_first(x)
-        h = self.conv(x)               # (B, 512, L_out)
-        return h.transpose(1, 2)       # (B, L_out, 512)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         """
         Full forward pass: conv features -> flatten -> FC -> final activation.
-
         Returns logits (or embeddings) of shape (batch, emb_size).
         """
-        feats = self.forward_features(x)   # (B, L_out, 512)
-        # Flatten: treat the last two dims as one vector
-        flat = feats.reshape(feats.size(0), -1)  # (B, L_out*512)
-        x = self.fc[1:](flat)  # skip the Flatten module, we did it manually
-        # More elegantly, we could just use self.fc(feats) after transposing back to (B,512,L_out)
-        # But let's use the sequential directly on the transposed tensor:
-        # feats must be (B, C, L) for Conv1d-like flatten? No, nn.Flatten flattens everything after dim 1.
-        # If we give (B, L_out, 512) to self.fc (which starts with Flatten), it will flatten to (B, L_out*512) – correct.
-        # So we can simply do:
-        # return self.fc(feats)
-        # However, our self.fc begins with Flatten, which expects any shape, so we can use it directly.
-        # Let's use the cleaner approach:
-        return self.final_act(self.fc(feats))
+        x = self.features(x)  # (B, L_out, 512)
+        middle = x.flatten(1)
+        feats = self.fc(middle)  # skip the Flatten module, we did it inside the self.fc sequential
+        return feats
 
-    def encode(
-        self,
-        x: torch.Tensor,
-        pool: Optional[str] = None,  # kept for interface compatibility, not used here
-    ) -> torch.Tensor:
+    def encode(self, x: torch.Tensor) -> torch.Tensor:  # kept for interface compatibility, not used here
         """
-        Return the final embedding / classification vector.
-        (Same as forward, but explicitly documented for feature extraction.)
+        Return the final embedding vector, explicitly documented for feature extraction.
         """
-        return self.forward(x)
-        
+        x = self.features(x)
+        middle = x.flatten(1)
+        feats = self.embedding(middle)
+        return feats
 
-class SharedCNN1D(nn.Module):
-    def __init__(self, input_channels: int = 1, input_length: int = 700):
-        super().__init__()
 
-        self.input_channels = input_channels
-        self.input_length = input_length
-        self.output_channels = 320
+# ---------------------------------------------------------------------------
+# Save / load / predict
+# ---------------------------------------------------------------------------
+def get_model_by_name(model_name, **kwargs):
+    """Factory function to get a model by name."""
+    if model_name == "cnn_best_norm":
+        return CnnBestNorm(**kwargs)
+    elif model_name == "trace_transformer_encoder":
+        return TraceTransformer1D_encoder(**kwargs)
+    elif model_name == "trace_transformer_decoder_only":
+        return TraceTransformer1D_decoder_only(**kwargs)
+    else:
+        raise ValueError(f"Unknown model name: {model_name}")
 
-        self.net = nn.Sequential(
-            nn.Conv1d(
-                input_channels,
-                64,
-                kernel_size=11,
-                stride=2,
-                padding=5,
-            ),
-            nn.BatchNorm1d(64),
-            nn.ReLU(inplace=True),
 
-            nn.Conv1d(
-                64,
-                128,
-                kernel_size=11,
-                stride=2,
-                padding=5,
-            ),
-            nn.BatchNorm1d(128),
-            nn.ReLU(inplace=True),
+def save_sca_model(model, model_file):
+    """Checkpoint that carries enough metadata to rebuild the architecture."""
+    model_dict ={"model_name": type(model).__name__,
+                 "init_kwargs": model.init_kwargs,
+                 "state_dict": model.state_dict()
+                }
+    torch.save(model_dict, model_file)
 
-            nn.Conv1d(
-                128,
-                256,
-                kernel_size=11,
-                stride=2,
-                padding=5,
-            ),
-            nn.BatchNorm1d(256),
-            nn.ReLU(inplace=True),
 
-            nn.Conv1d(
-                256,
-                320,
-                kernel_size=11,
-                stride=2,
-                padding=5,
-            ),
-            nn.BatchNorm1d(320),
-            nn.ReLU(inplace=True),
-        )
-
-    def _to_channels_first(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim != 3:
-            raise ValueError(
-                f"Expected 3D input, got {tuple(x.shape)}"
-            )
-
-        if x.shape[-1] == self.input_channels:
-            return x.transpose(1, 2)
-
-        if x.shape[1] == self.input_channels:
-            return x
-
-        raise ValueError(
-            f"Unexpected input shape: {tuple(x.shape)}"
-        )
-
-    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        x = self._to_channels_first(x)
-        h = self.net(x)
-
-        return h.transpose(1, 2)
-
-    def forward_temporal(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_features(x)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_features(x)
-
-    def encode(self, x: torch.Tensor, pool: str = "mean_max") -> torch.Tensor:
-        h = self.forward_features(x)
-
-        if pool == "mean":
-            return h.mean(dim=1)
-
-        if pool == "max":
-            return h.max(dim=1).values
-
-        if pool == "mean_max":
-            return torch.cat(
-                [
-                    h.mean(dim=1),
-                    h.max(dim=1).values,
-                ],
-                dim=1,
-            )
-
-        if pool in ("none", None):
-            return h
-
-        raise ValueError(
-            f"Unsupported pooling mode: {pool}"
-        )
-
-    def get_output_dim(self, pool: str = "mean_max") -> int:
-        if pool in ("mean", "max"):
-            return self.output_channels
-
-        if pool == "mean_max":
-            return self.output_channels * 2
-
-        if pool in ("none", None):
-            raise ValueError(
-                "Temporal output does not have one fixed vector dimension."
-            )
-
-        raise ValueError(
-            f"Unsupported pooling mode: {pool}"
-        )
-
-    def get_temporal_output_dim(self) -> int:
-        return self.output_channels
+def load_sca_model(model_file):
+    supporting_functions.check_file_exists(model_file)
+    device = supporting_functions.get_device()
+    try:
+        try:
+            checkpoint = torch.load(model_file, map_location=device, weights_only=False)
+        except TypeError:  # torch versions without the weights_only kwarg
+            checkpoint = torch.load(model_file, map_location=device)
+        model_name = checkpoint["model_name"]
+        model = get_model_by_name(model_name, **checkpoint["init_kwargs"])
+        model.load_state_dict(checkpoint["state_dict"])
+        model.to(device)
+        # In PyTorch, model.eval() puts the model into evaluation mode.
+        # Technically, it sets the training attribute of the module and all its submodules to False.
+        model.eval()
+    except Exception as exc:
+        print("Error: can't load PyTorch model file {} ({})".format(model_file, exc))
+        sys.exit(-1)
+    return model
 
 
 # ----------------------------------------------------------------------
-#   Builder functions
+#   Factory Builder functions
 # ----------------------------------------------------------------------
-def build_cnn_simple_backbone(input_channels: int = 1, input_length: int = 700) -> SharedCNN1D:
-
-    return SharedCNN1D(input_channels=input_channels, input_length=input_length)
-
-
-def build_cnn_best_norm_backbone(input_channels: int = 1, input_length: int = 1400) -> CnnBestNorm:
-    """
-    Factory function for the CnnBestNorm model.
-
-    The ``name`` parameter is kept for interface consistency with other
-    backbones; currently only ``"cnn_best_norm"`` is supported.
-    """
-    return CnnBestNorm(input_channels=input_channels, input_length=input_length) 
+def build_cnn_best_norm(input_length, emb_size=256):
+    input_channels = 1  # Assuming single-channel input for classification
+    return CnnBestNorm(input_length, emb_size)
 
 
-def build_transformer_backbone(
-    input_channels: int = 1,
-    input_length: int = 700,
-    **kwargs,
-) -> TraceTransformer1D:
-    return TraceTransformer1D(
-        input_channels=input_channels,
-        input_length=input_length,
-        **kwargs,
-    )
+def build_transformer_encoder(input_channels, input_length):
+    return TraceTransformer1D_encoder(input_channels=input_channels, input_length=input_length)
 
-def build_backbone(model_name: str = "shared_cnn_v1", input_channels: int = 1, input_length: int = 700, **kwargs):
+
+def build_transformer_decoder_only(input_channels, input_length):
+    return TraceTransformer1D_decoder_only(input_channels=input_channels, input_length=input_length)
+
+
+def build_model(model_name, input_length, emb_size=256):
     """
     Factory for all supported backbones.
-    
+
     Returns a model with:
       - forward_features(x)     -> (B, L_out, C_out)
       - encode(x, pool)         -> (B, rep_dim)  (global pooling or flat)
       - get_output_dim(pool)    -> int
     """
-    if model_name == "shared_cnn_v1":
-        return SharedCNN1D(input_channels=input_channels, input_length=input_length)
-    
-    elif model_name == "cnn_best_norm":
-        return CnnBestNorm(input_channels=input_channels, input_length=input_length) 
-    
-    elif model_name == "trace_transformer_v1":
-        return build_transformer_backbone(
-            input_channels=input_channels,
-            input_length=input_length,
-            **kwargs,
-        )
-    
+    input_channels = 1
+
+    if model_name == "cnn_best_norm":
+        return build_cnn_best_norm(input_length=input_length, emb_size=emb_size)
+
+    elif model_name == "trace_transformer_encoder":
+        return build_transformer_encoder(input_channels=input_channels, input_length=input_length)
+
+    elif model_name == "trace_transformer_decoder_only":
+        return build_transformer_decoder_only(input_channels=input_channels, input_length=input_length)
+
     else:
         raise ValueError(f"Unknown backbone: {model_name}")
