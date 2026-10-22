@@ -208,10 +208,12 @@ class SCAModel(nn.Module):
         except (StopIteration, AttributeError):
             device = torch.device("cpu")
 
+        #was_training = self.training
         self.eval()
         with torch.no_grad():
             dummy = torch.zeros(1, in_channels, input_dim, device=device)
             flat = feature_fn(dummy).flatten(1).shape[1]
+        #self.train(was_training)
         return flat
 
 
