@@ -12,7 +12,7 @@ Results:
 - However, the classifier trained under the correct key hypothesis successfully achieved Profiling Key Rank 0 using the same 5,000 test traces.
 
 ## Ongoing
-Checking the code of foundation model sca
+Read the code of foundation model sca and inspect potential bug.
 
 ## To Do
 Read the paper of "Early Exit"
