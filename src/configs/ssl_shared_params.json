@@ -1,0 +1,23 @@
+{
+  "seed": 47,
+
+  "batch_size": 64,
+  "lr": 0.001,
+  "epochs": 100,
+  "pool_mode": "mean_max",
+  "weight_decay": 1e-4,
+
+  "temperature": 0.2,
+  "max_shift": 5,
+  "noise_std": 0.05,
+  "denoise_kernel_size": 5,
+
+  "n_train": 500,
+  "n_finetune": 500,
+  "n_attack": 25,
+
+  "encode_batch_size": 256,
+
+  "knn_neighbors": 7,
+  "knn_weights": "distance"
+}

@@ -1,12 +1,15 @@
 # Self-Supervised Learning for Side-Channel Analysis
 
-This project evaluates fixed 1-D self-supervised learning (SSL) baselines on
-ASCAD power traces. The purpose is to compare representation-learning methods
-for side-channel analysis, not to expose a large hyperparameter-search surface.
+## Overview of the research
+This project is focus on research of a non profiling side-channel attack framework, in which, we will train one universal encoder with ssl methods (e.g., simclr, byol, or mae), and then unsing this encoder to extract features from side-channel dataset, and then train 256 knn or simple classifiers with few shot labelled data (on-the-fly technique) for the side-channel attacks. The proposed method is superior than previous method such as TripletPower (https://github.com/UCdasec/TripletPower), which need to train 256 encoders, way more time consuming. In the experiments, we will evaluates fixed 1-D self-supervised learning (SSL) baselines on ASCAD dataset and TinyPower dataset.
 
-Each experiment pre-trains an encoder on unlabeled profiling traces, saves the
-encoder checkpoint, and can use its representations in a downstream profiling
-or non-profiling attack.
+Each experiment pre-trains an encoder on unlabeled profiling traces, saves the encoder checkpoint, and can use its representations in a downstream profiling or non-profiling attack. In the non-profiling attack, we use on-the-fly strategy and we using the Hamming Weight leakage model, and we use the TripletPower paper as the baseline.
+
+We can also try to use pre-trained foundation model as the backbone and compare whether it can beat the model train from scratch.
+
+
+## Dataset to be used
+
 
 ## Experiment design
 
@@ -15,42 +18,32 @@ experiment identity and data/run controls:
 
 - SSL method
 - input dataset and output directory
-- trace window
-- number of unlabeled profiling traces
+- attack window [The point of interests in the power or em trace]
+- number of unlabeled profiling traces [optional]
+- name of ssl method
+- method of the classifier, e.g., KNN, MLP, etc
 
-Architecture, loss, optimizer, and augmentation choices are fixed baselines in
-[`SSL_METHOD_PRESETS`](src/methods/ssl_factory.py). They are intentionally not
-CLI options. This ensures that the model trained by `train_ssl_model` has the
-same shape and settings as the one reconstructed by `build_ssl_model` for
-checkpoint evaluation.
+Architecture, loss, optimizer, and augmentation choices are fixed baselines in [`SSL_METHOD_PRESETS`](src/methods/ssl_factory.py). They are intentionally not CLI options. This ensures that the model trained by `train_ssl_model` has the same shape and settings as the one reconstructed by `build_ssl_model` for checkpoint evaluation.
 
-To adopt a different baseline later, edit one method entry in
-`src/methods/ssl_factory.py` and record the change with the experiment output.
-Do not add a new argparse option for an individual model parameter.
+To adopt a different baseline later, edit one method entry in `src/methods/ssl_factory.py` and record the change with the experiment output.
+
 
 ## Supported methods and fixed baselines
 
 | Method | Encoder and method setup | Training setup |
 | --- | --- | --- |
 | `simclr` | Shared 1-D CNN, mean+max pooling, 320-wide projector hidden layer, 128-d projection | 100 epochs, batch 64, Adam LR 0.001, weight decay 1e-4; independent random shift/denoise/noise views |
+| `simclr` | transformer model | 100 epochs, batch 64, |
 | `ts2vec` | Shared 1-D CNN, mean+max pooling | 10 epochs, batch 64, AdamW LR 0.001; hierarchical temporal cropping and timestamp masking |
-| `ts_tcc` | Shared 1-D CNN with a 256-d temporal context module | 100 epochs, batch 64, AdamW LR 0.0003; weak/strong random views |
-| `byol` | Shared 1-D CNN, mean+max pooling, 128-d projection, 512-d hidden layers, EMA 0.996 | 100 epochs, batch 128, Adam LR 0.0003; independent random shift/noise views |
-| `lhf_bootstrap` | Shared 1-D CNN with MLP and temporal-convolution bootstrap heads | 100 epochs, batch 128, AdamW LR 0.0003; random shift/denoise/noise views |
+| `ts2vec` | transformer model | 100 epochs, batch 64, |
 | `mae` | Trace transformer, mean+max pooling, patch size 5, mask ratio 0.30 | 100 epochs, batch 128, AdamW LR 0.0001 |
 | `time_mae` | Trace transformer, mean+max pooling, patch size 10, mask ratio 0.60, target EMA 0.996 | 100 epochs, batch 128, AdamW LR 0.0001 |
 
-The shared CNN is `shared_cnn_v1`. It is used for the temporal SSL methods
-because TS2Vec and TS-TCC need a sequence of temporal features; the separate
-CNN-best implementation does not provide a suitable temporal sequence at the
-700-sample trace length.
+The shared CNN is `CNN-best`, and the transformer model is ???
 
 ### Random augmentation policy
 
-For methods using random views, the policy itself is fixed. For example,
-SimCLR always uses the `random_shift`, `denoise` and `gaussian_noise` family. Each view
-independently samples which transforms to apply with probability 0.5, so the
-view realization is random while the experiment definition remains fixed.
+For methods using random views, the policy itself is fixed. For example, SimCLR always uses the `random_shift`, `denoise` and `gaussian_noise` family. Each view independently samples which transforms to apply with probability 0.5, so the view realization is random while the experiment definition remains fixed.
 
 ## Data contract
 
